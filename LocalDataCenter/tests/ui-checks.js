@@ -159,6 +159,10 @@
     assert($('preview-next').disabled && !$('preview-prev').disabled, 'PDF navigation updates boundaries');
     await openPreview(await attachment('broken.pdf',new TextEncoder().encode('invalid PDF')));
     assert($('preview-status').textContent.includes('無法預覽') && $('preview-download').getAttribute('href'), 'Damaged PDF retains download fallback');
+    assert(!$('preview-status').textContent.includes('UTF-8'), 'PDF errors do not suggest changing text encoding');
+    await openPreview({id:'00000000000000000000000000000000.bin',name:'missing.pdf'});
+    assert($('preview-status').textContent.includes('找不到附件原檔') && $('preview-status').textContent.includes('Attachments') && $('preview-status').textContent.includes('HTTP 404'), 'Missing restored PDF reports actual attachment location and HTTP status');
+    assert(!$('preview-status').textContent.includes('UTF-8'), 'Missing PDF is not reported as a text encoding problem');
     const loading = openPreview(pdfFile);
     $('preview').close(); disposePreview(); await loading;
     assert(!previewSession, 'Closing during loading does not restore preview');

@@ -175,7 +175,7 @@ async function renderPreviewPage(session, number = session.page) {
         page.cleanup();
     } catch (error) {
         session.rendered.delete(number);
-        if (previewSession === session) $('preview-status').textContent = '第 ' + number + ' 頁預覽失敗，可下載原檔查看。';
+        if (previewSession === session) $('preview-status').textContent = '第 ' + number + ' 頁 PDF 預覽失敗：' + (error.message || String(error)) + '。可下載原檔查看。';
     }
 }
 
@@ -199,7 +199,11 @@ async function openPreview(file) {
     }
     try {
         const response = await fetch(url, {signal:session.controller.signal});
-        if (!response.ok) throw Error('無法讀取附件');
+        if (!response.ok) {
+            let details;
+            try { details = await response.json(); } catch {}
+            throw Error((details?.error || '無法讀取附件') + '（HTTP ' + response.status + '）');
+        }
         const bytes = await response.arrayBuffer();
         if (previewSession !== session) return;
         if (type) {
@@ -254,7 +258,13 @@ async function openPreview(file) {
             $('preview-status').textContent = '';
         }
     } catch (error) {
-        if (previewSession === session) $('preview-status').textContent = '無法預覽此檔案：' + (error.message || String(error)) + '。可下載原檔查看（純文字需為 UTF-8 編碼）。';
+        if (previewSession === session) {
+            let reason = error.message || String(error);
+            if (error.name === 'PasswordException') reason = '此 PDF 需要密碼，目前預覽不支援輸入密碼';
+            if (error.name === 'InvalidPDFException') reason = 'PDF 內容無法解析，可能是不完整或損壞的檔案（' + reason + '）';
+            const hint = textTypes.has(ext) && error instanceof TypeError ? '；純文字檔需為 UTF-8 編碼' : '';
+            $('preview-status').textContent = '無法預覽此檔案：' + reason + hint + '。可下載原檔查看。';
+        }
     }
 }
 $('preview').addEventListener('close', () => { if (!$('preview').open) disposePreview(); });
@@ -565,8 +575,9 @@ function render() {
         };
         summary.append(toggle);
         const article = element('article');
-        const content = element('div');
+        const content = element('div', undefined, 'event-content');
         content.innerHTML = cleanHTML(event.html);
+        enableHorizontalPan(content, () => content);
         const files = element('div');
         drawFiles(files, event.files);
         const edit = element('button', '編輯事件');
@@ -624,6 +635,7 @@ function localDate(date) {
 
 function openEditor(event) {
     cellStart = cellEnd = undefined;
+    closeTableMenu(); closeColorPalette();
     draft = {id:event?.id, sectionId, status:eventStatus(event), files:[...(event?.files || [])]};
     selection = undefined;
     $('event-title').value = event?.title || '';
@@ -692,7 +704,6 @@ function command(action, value) {
 
 for (const button of document.querySelectorAll('[data-command]')) button.onclick = () => command(button.dataset.command);
 $('font').onchange = event => { command('fontSize', event.target.value); event.target.value = ''; };
-$('color').oninput = event => command('foreColor', event.target.value);
 $('table').onclick = () => {
     const rows = prompt('表格有幾個 row？（1–20）', '3');
     if (rows === null) return;

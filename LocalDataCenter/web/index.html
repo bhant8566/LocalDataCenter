@@ -44,12 +44,13 @@
 <div class="toolbar" aria-label="格式工具">
   <button type="button" data-command="bold"><b>粗體</b></button>
   <select id="font" aria-label="字體大小"><option value="">字體大小</option><option value="2">小</option><option value="3">一般</option><option value="4">中</option><option value="5">大</option><option value="6">特大</option></select>
-  <label class="color">文字顏色<input type="color" id="color" value="#19312d"></label>
-  <button type="button" id="table">插入表格</button><button type="button" id="merge-cells">合併儲存格</button><button type="button" id="split-cells">分割儲存格</button><button type="button" id="add-image">插入圖片</button>
+  <div class="color-picker"><button type="button" id="color" aria-expanded="false" aria-controls="color-palette"><span class="color-dot" aria-hidden="true"></span>文字顏色</button><div id="color-palette" role="group" aria-label="文字固定色盤" hidden></div></div>
+  <button type="button" id="table">插入表格</button><button type="button" id="add-image">插入圖片</button>
   <button type="button" id="add-file">加入附件</button><button type="button" data-tool="ocr">OCR</button>
 </div>
 <div id="body" contenteditable="true" role="textbox" aria-label="事件內容" aria-multiline="true"></div>
-<small>表格：拖曳儲存格左側邊緣框選，或按 Shift 點選另一格，再按合併。分割會還原合併格。</small>
+<small>表格：Shift＋左鍵拖曳可框選儲存格，再按右鍵選擇合併／分割。寬表格可使用底部水平捲動條，或同時按住左右鍵拖移。</small>
+<div id="table-menu" role="menu" aria-label="儲存格操作" hidden><button type="button" id="merge-cells" role="menuitem">合併儲存格</button><button type="button" id="split-cells" role="menuitem">分割儲存格</button></div>
 <input id="image-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden>
 <input id="attach-file" type="file" hidden>
 <div id="edit-files"></div>

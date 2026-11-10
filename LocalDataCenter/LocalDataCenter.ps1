@@ -529,6 +529,8 @@ try {
                         Send-Response $stream '200 OK' $type ([IO.File]::ReadAllBytes($file)) $extra
                         continue
                     }
+                    Send-Json $stream @{error="找不到附件原檔：$file。請確認備份的 Attachments 已放回這個資料位置，並保留原始檔名。"} '404 Not Found'
+                    continue
                 }
                 if ($path -match '^/(app\.(js|css)|features\.js|vendor/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*)$' -and $path -notmatch '(^|/)\.{1,2}(/|$)') {
                     $file = Join-Path $web $path.Substring(1)

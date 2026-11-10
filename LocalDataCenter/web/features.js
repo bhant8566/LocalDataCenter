@@ -81,13 +81,34 @@ $('delete-container').onclick = async () => {
 
 function renderWorkbookPreview(bytes) {
     const workbook = XLSX.read(bytes, {type:'array', cellText:true, cellHTML:false, bookVBA:false});
-    const select = element('select'); select.setAttribute('aria-label','工作表');
+    const tabs = element('div',undefined,'workbook-tabs');
+    tabs.setAttribute('role','tablist'); tabs.setAttribute('aria-label','工作表');
     const container = element('div',undefined,'workbook-sheet');
-    for (const name of workbook.SheetNames) { const option = element('option',name); option.value = name; select.append(option); }
+    container.id='workbook-panel'; container.setAttribute('role','tabpanel'); container.tabIndex=0;
+    container.setAttribute('aria-label','工作表內容，可水平捲動');
+    let activeSheet=workbook.SheetNames[0];
+    workbook.SheetNames.forEach((name,index)=>{
+        const button=element('button',name); button.type='button'; button.id='workbook-tab-'+index;
+        button.dataset.sheet=name; button.setAttribute('role','tab'); button.setAttribute('aria-controls',container.id);
+        button.onclick=()=>{activeSheet=name;draw();};
+        button.onkeydown=e=>{
+            const offsets={ArrowRight:1,ArrowLeft:-1,Home:-index,End:workbook.SheetNames.length-1-index};
+            if (!(e.key in offsets)) return;
+            e.preventDefault();
+            const next=tabs.children[(index+offsets[e.key]+workbook.SheetNames.length)%workbook.SheetNames.length]; next.click(); next.focus();
+        };
+        tabs.append(button);
+    });
     const draw = () => {
-        const sheet = workbook.Sheets[select.value];
+        for (const button of tabs.children) {
+            const selected=button.dataset.sheet===activeSheet;
+            button.setAttribute('aria-selected',String(selected)); button.tabIndex=selected?0:-1;
+            if(selected) container.setAttribute('aria-labelledby',button.id);
+        }
+        const sheet = workbook.Sheets[activeSheet];
         container.replaceChildren();
-        if (!sheet?.['!ref']) { container.append(element('p','空白工作表')); return; }
+        container.scrollLeft=container.scrollTop=0;
+        if (!sheet?.['!ref'] || !Object.keys(sheet).some(key=>/^[A-Z]+[1-9]\d*$/.test(key) && sheet[key].t!=='z')) { container.append(element('p','空白工作表')); return; }
         const range = XLSX.utils.decode_range(sheet['!ref']);
         if ((range.e.r + 1) * (range.e.c + 1) > 200000) { container.append(element('p','工作表過大，請下載原檔查看。')); return; }
         const table = element('table');
@@ -114,9 +135,52 @@ function renderWorkbookPreview(bytes) {
         }
         container.append(table);
     };
-    select.onchange = draw;
-    $('preview-content').append(select,container); draw();
+    const hint=element('p','同時按住滑鼠左右鍵，再左右移動可拖移表格；亦可使用下方水平捲動條。','table-pan-hint');
+    $('preview-content').append(tabs,hint,container); draw();
 }
+
+// Listen for both pointer and mouse events: pressing the second button does not
+// fire another pointerdown, and releasing just one button is not a pointerup.
+function enableHorizontalPan(root, getScroller) {
+    let pan, suppressMenu=false, suppressClick=false;
+    const end=()=>{
+        if(!pan)return;
+        root.classList.remove('horizontal-panning'); pan.scroller.classList.remove('horizontal-panning'); pan=undefined;
+        document.removeEventListener('pointermove',move);
+        document.removeEventListener('mouseup',release);
+        document.removeEventListener('pointercancel',end);
+        window.removeEventListener('blur',end);
+    };
+    const start=e=>{
+        if((e.buttons&3)!==3) { if(!pan && e.type==='pointerdown') suppressMenu=suppressClick=false; return; }
+        if(root===$('preview') && outsidePreview(e)) return;
+        const scroller=getScroller();
+        if(!scroller || scroller.scrollWidth<=scroller.clientWidth) return;
+        e.preventDefault(); suppressMenu=suppressClick=true;
+        if(pan)return;
+        pan={scroller,x:e.clientX,left:scroller.scrollLeft};
+        root.classList.add('horizontal-panning'); scroller.classList.add('horizontal-panning');
+        document.addEventListener('pointermove',move,{passive:false});
+        document.addEventListener('mouseup',release);
+        document.addEventListener('pointercancel',end);
+        window.addEventListener('blur',end);
+    };
+    const move=e=>{
+        if(!pan)return;
+        if((e.buttons&3)!==3 || !root.isConnected) {end();return;}
+        e.preventDefault(); pan.scroller.scrollLeft=pan.left+pan.x-e.clientX;
+    };
+    const release=e=>{if((e.buttons&3)!==3)end();};
+    root.addEventListener('pointerdown',start);
+    root.addEventListener('mousedown',start);
+    root.addEventListener('pointermove',e=>{if(!pan && (e.buttons&3)===3)start(e);});
+    root.addEventListener('contextmenu',e=>{if(pan || suppressMenu){e.preventDefault();e.stopPropagation();suppressMenu=false;}},true);
+    for(const type of ['click','auxclick']) root.addEventListener(type,e=>{if(suppressClick){e.preventDefault();e.stopPropagation();}},true);
+    root.addEventListener('keydown',()=>{suppressMenu=suppressClick=false;});
+    root.closest('dialog')?.addEventListener('close',end);
+}
+enableHorizontalPan($('preview'),()=>$('preview-content').querySelector('.workbook-sheet'));
+enableHorizontalPan(editor,()=>editor);
 
 function updatePreviewPage(session, number) {
     if (previewSession !== session) return;
@@ -179,6 +243,7 @@ function splitRecord(model, cell) {
     }
 }
 let cellStart, cellEnd, selectingCells = false;
+let cellPointer, cellFrame, cellPosition;
 function cellAt(node) { return (node?.nodeType===1 ? node : node?.parentElement)?.closest('td,th'); }
 function clearCellSelection() { editor.querySelectorAll('.cell-selected').forEach(c=>c.classList.remove('cell-selected')); }
 function selectedRectangle() {
@@ -186,7 +251,16 @@ function selectedRectangle() {
     const table=cellStart.closest('table'), model=tableModel(table);
     const a=model.records.find(v=>v.td===cellStart), b=model.records.find(v=>v.td===cellEnd);
     const bounds={r:Math.min(a.r,b.r),c:Math.min(a.c,b.c),bottom:Math.max(a.r+a.rs,b.r+b.rs),right:Math.max(a.c+a.cs,b.c+b.cs)};
-    const cells=model.records.filter(v=>v.r<bounds.bottom && v.r+v.rs>bounds.r && v.c<bounds.right && v.c+v.cs>bounds.c);
+    let cells, expanded;
+    do {
+        expanded=false;
+        cells=model.records.filter(v=>v.r<bounds.bottom && v.r+v.rs>bounds.r && v.c<bounds.right && v.c+v.cs>bounds.c);
+        for(const cell of cells) {
+            if(cell.r<bounds.r || cell.c<bounds.c || cell.r+cell.rs>bounds.bottom || cell.c+cell.cs>bounds.right) expanded=true;
+            bounds.r=Math.min(bounds.r,cell.r); bounds.c=Math.min(bounds.c,cell.c);
+            bounds.bottom=Math.max(bounds.bottom,cell.r+cell.rs); bounds.right=Math.max(bounds.right,cell.c+cell.cs);
+        }
+    } while(expanded);
     return {table,model,bounds,cells};
 }
 function highlightCells() {
@@ -194,20 +268,75 @@ function highlightCells() {
     try { selectedRectangle().cells.forEach(v=>v.td.classList.add('cell-selected')); } catch {}
 }
 editor.addEventListener('pointerdown', e => {
+    if(e.button!==0 || (e.buttons&3)===3) return;
+    closeTableMenu();
     const cell=cellAt(e.target);
     if (!cell || !editor.contains(cell)) { cellStart=cellEnd=undefined; clearCellSelection(); return; }
-    if (e.shiftKey && cellStart?.isConnected && cellStart.closest('table')===cell.closest('table')) {
-        e.preventDefault(); cellEnd=cell; highlightCells(); return;
-    }
     cellStart=cellEnd=cell; clearCellSelection();
-    if (e.clientX-cell.getBoundingClientRect().left<=10) { e.preventDefault(); selectingCells=true; highlightCells(); }
+    if (!e.shiftKey) return;
+    e.preventDefault(); selection=undefined; getSelection().removeAllRanges();
+    selectingCells=true; cellPointer=e.pointerId; cellPosition={x:e.clientX,y:e.clientY};
+    editor.classList.add('selecting-cells'); highlightCells();
+    if(e.isTrusted) editor.setPointerCapture(e.pointerId);
+    cellFrame=requestAnimationFrame(trackCellSelection);
 });
-editor.addEventListener('pointerover', e => {
+function trackCellSelection() {
+    if(!selectingCells || !cellStart?.isConnected) {endCellSelection();return;}
+    const rect=editor.getBoundingClientRect();
+    const dx=cellPosition.x<rect.left+24?-14:cellPosition.x>rect.right-24?14:0;
+    const dy=cellPosition.y<rect.top+20?-10:cellPosition.y>rect.bottom-20?10:0;
+    editor.scrollLeft+=dx; editor.scrollTop+=dy;
+    const hit=document.elementFromPoint(Math.max(rect.left+4,Math.min(rect.right-4,cellPosition.x)),Math.max(rect.top+4,Math.min(rect.bottom-4,cellPosition.y)));
+    const cell=cellAt(hit);
+    if(cell && cell.closest('table')===cellStart.closest('table') && cell!==cellEnd) {cellEnd=cell;highlightCells();}
+    cellFrame=requestAnimationFrame(trackCellSelection);
+}
+function endCellSelection() {
+    selectingCells=false; cancelAnimationFrame(cellFrame); editor.classList.remove('selecting-cells');
+    if(cellPointer!==undefined && editor.hasPointerCapture(cellPointer)) editor.releasePointerCapture(cellPointer);
+    cellPointer=undefined;
+}
+document.addEventListener('pointermove', e => {
+    if(!selectingCells)return;
+    if(!(e.buttons&1) || (e.buttons&3)===3) {endCellSelection();return;}
+    e.preventDefault(); cellPosition={x:e.clientX,y:e.clientY};
+    const cell=cellAt(document.elementFromPoint(e.clientX,e.clientY));
+    if(cell && cell.closest('table')===cellStart?.closest('table') && cell!==cellEnd) {cellEnd=cell;highlightCells();}
+},{passive:false});
+document.addEventListener('pointerup',endCellSelection);
+document.addEventListener('pointercancel',endCellSelection);
+editor.addEventListener('lostpointercapture',endCellSelection);
+window.addEventListener('blur',endCellSelection);
+$('edit').addEventListener('close',()=>{endCellSelection();closeTableMenu();closeColorPalette();});
+
+function closeTableMenu() { $('table-menu').hidden=true; }
+editor.addEventListener('contextmenu',e=>{
+    if(e.defaultPrevented || (e.buttons&3)===3)return;
     const cell=cellAt(e.target);
-    if (selectingCells && cell && cell.closest('table')===cellStart.closest('table')) { cellEnd=cell; highlightCells(); }
+    if(!cell || !editor.contains(cell)) {closeTableMenu();return;}
+    e.preventDefault(); endCellSelection();
+    if(!cell.classList.contains('cell-selected')) {cellStart=cellEnd=cell;highlightCells();}
+    const {cells,bounds:b}=selectedRectangle();
+    $('merge-cells').disabled=cells.length<2 || cells.reduce((sum,v)=>sum+v.rs*v.cs,0)!==(b.bottom-b.r)*(b.right-b.c);
+    $('split-cells').disabled=!cells.some(v=>v.rs>1 || v.cs>1);
+    const menu=$('table-menu');menu.hidden=false;
+    const rect=cell.getBoundingClientRect();
+    menu.style.left=Math.max(8,Math.min(e.clientX || rect.left,innerWidth-menu.offsetWidth-8))+'px';
+    menu.style.top=Math.max(8,Math.min(e.clientY || rect.bottom,innerHeight-menu.offsetHeight-8))+'px';
+    menu.querySelector('button:not(:disabled)')?.focus({preventScroll:true});
 });
-document.addEventListener('pointerup',()=>selectingCells=false);
+document.addEventListener('pointerdown',e=>{if(!$('table-menu').contains(e.target))closeTableMenu();},true);
+for(const target of [editor,$('edit'),window]) target.addEventListener('scroll',closeTableMenu,{passive:true});
+$('table-menu').addEventListener('keydown',e=>{
+    if(e.key==='Escape') {e.preventDefault();e.stopPropagation();closeTableMenu();editor.focus({preventScroll:true});return;}
+    if(!['ArrowDown','ArrowUp','Home','End'].includes(e.key))return;
+    e.preventDefault();const buttons=[...$('table-menu').querySelectorAll('button:not(:disabled)')];
+    const i=buttons.indexOf(document.activeElement);
+    const next=e.key==='Home'?0:e.key==='End'?buttons.length-1:(i+(e.key==='ArrowDown'?1:-1)+buttons.length)%buttons.length;
+    buttons[next]?.focus();
+});
 $('merge-cells').onclick = () => {
+    closeTableMenu();
     try {
         const {table,model,bounds:b,cells}=selectedRectangle();
         if (cells.length<2) throw Error('請選取兩個以上儲存格。');
@@ -221,12 +350,56 @@ $('merge-cells').onclick = () => {
     } catch (error) { notice(error.message); }
 };
 $('split-cells').onclick = () => {
+    closeTableMenu();
     try {
         const {table,model,cells}=selectedRectangle();
         cells.filter(v=>v.rs>1 || v.cs>1).forEach(v=>splitRecord(model,v));
         drawTableModel(table,model); clearCellSelection();
     } catch (error) { notice(error.message); }
 };
+
+const textColors=[
+    ['#000000','黑色'],['#808080','灰色'],['#99001a','深紅'],['#ed1c24','紅色'],['#ff7f27','橘色'],['#fff200','黃色'],['#22b14c','綠色'],['#00a2e8','藍綠'],['#3f48cc','藍色'],['#a349a4','紫色'],
+    ['#ffffff','白色'],['#c0c0c0','淺灰'],['#b97a57','棕色'],['#ffaec9','粉紅'],['#ffc90e','金黃'],['#efe4b0','米黃'],['#b5e61d','黃綠'],['#99d9ea','淺藍綠'],['#7092be','灰藍'],['#c8bfe7','淡紫'],
+    ['#f5f5f5','灰階 1'],['#e0e0e0','灰階 2'],['#cccccc','灰階 3'],['#b3b3b3','灰階 4'],['#999999','灰階 5'],['#777777','灰階 6'],['#555555','灰階 7'],['#333333','灰階 8'],['#19312d','深綠'],['#005a9c','深藍']
+];
+function closeColorPalette() { $('color-palette').hidden=true; $('color').setAttribute('aria-expanded','false'); }
+for(const [color,name] of textColors) {
+    const button=element('button');button.type='button';button.dataset.color=color;
+    button.title=name+' '+color;button.setAttribute('aria-label',button.title);button.setAttribute('aria-pressed',String(color==='#000000'));
+    button.style.backgroundColor=color;
+    button.onpointerdown=e=>e.preventDefault();
+    button.onclick=()=>{
+        if(editor.querySelector('.cell-selected')) {
+            for(const {td} of selectedRectangle().cells) {
+                td.style.color=color;
+                for(const child of td.querySelectorAll('*')) {child.style.removeProperty('color');if(child.tagName==='FONT')child.removeAttribute('color');}
+            }
+        } else command('foreColor',color);
+        $('color').style.setProperty('--selected-color',color);
+        for(const swatch of $('color-palette').children)swatch.setAttribute('aria-pressed',String(swatch===button));
+        closeColorPalette();
+    };
+    $('color-palette').append(button);
+}
+$('color').onpointerdown=e=>e.preventDefault();
+$('color').onclick=()=>{
+    const open=$('color-palette').hidden;
+    $('color-palette').hidden=!open; $('color').setAttribute('aria-expanded',String(open));
+    if(open) {
+        const rect=$('color').getBoundingClientRect(), palette=$('color-palette');
+        palette.style.left=Math.max(8,Math.min(rect.left,innerWidth-palette.offsetWidth-8))+'px';
+        palette.style.top=Math.max(8,Math.min(rect.bottom+5,innerHeight-palette.offsetHeight-8))+'px';
+    }
+};
+document.addEventListener('pointerdown',e=>{if(!e.target.closest('.color-picker'))closeColorPalette();},true);
+$('color-palette').addEventListener('keydown',e=>{
+    if(e.key==='Escape') {e.preventDefault();e.stopPropagation();closeColorPalette();$('color').focus();return;}
+    const offset={ArrowLeft:-1,ArrowRight:1,ArrowUp:-10,ArrowDown:10}[e.key];
+    if(!offset)return;
+    e.preventDefault();const buttons=[...$('color-palette').children],i=buttons.indexOf(document.activeElement);
+    buttons[(i+offset+buttons.length)%buttons.length].focus();
+});
 
 function pasteTable(clipboard) {
     const html=clipboard.getData('text/html'), text=clipboard.getData('text/plain');

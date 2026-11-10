@@ -1,4 +1,4 @@
-﻿param([string]$Browser = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', [switch]$StatusOnly, [switch]$OCROnly)
+﻿param([string]$Browser = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', [switch]$StatusOnly, [switch]$OCROnly, [string]$PreviewPdf)
 $ErrorActionPreference = 'Stop'
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('ldc-ui-' + [guid]::NewGuid().ToString('N'))
 [IO.Directory]::CreateDirectory($testRoot) | Out-Null
@@ -63,6 +63,15 @@ try {
     $null = Cdp 'Emulation.setDeviceMetricsOverride' @{width=1440;height=1050;deviceScaleFactor=1;mobile=$false}
     $null = Cdp 'Page.navigate' @{url=$origin}
     Start-Sleep -Seconds 2
+    if ($PreviewPdf) {
+        $fixtureId = [guid]::NewGuid().ToString('N') + '.bin'
+        Copy-Item -LiteralPath $PreviewPdf -Destination (Join-Path $testRoot "data/Attachments/$fixtureId")
+        $previewCheck = '(async()=>{for(let i=0;i<500 && (typeof data==="undefined" || !data.capabilities);i++)await new Promise(r=>setTimeout(r,100));await openPreview({id:"' + $fixtureId + '",name:"restored.pdf"});for(let i=0;i<200 && !document.querySelector(".pdf-page canvas") && !document.querySelector("#preview-status").textContent.includes("失敗") && !document.querySelector("#preview-status").textContent.includes("無法預覽");i++)await new Promise(r=>setTimeout(r,100));return {status:document.querySelector("#preview-status").textContent,pages:previewSession?.pdf?.numPages,canvases:document.querySelectorAll(".pdf-page canvas").length};})()'
+        $result = Cdp 'Runtime.evaluate' @{expression=$previewCheck;awaitPromise=$true;returnByValue=$true}
+        if ($result.exceptionDetails) { throw ($result.exceptionDetails | ConvertTo-Json -Depth 10) }
+        $result.result.value | ConvertTo-Json -Depth 8
+        return
+    }
     if ($OCROnly) {
         $setup = '(async()=>{for(let i=0;i<500 && (typeof data==="undefined" || !data.capabilities);i++) await new Promise(r=>setTimeout(r,100));projectId=(await save({kind:"project",name:"OCR tests"})).id;sectionId=(await save({kind:"section",projectId,name:"Tests"})).id;eventId=(await save({kind:"event",sectionId,title:"OCR target",date:"2026-11-10",html:"",files:[],schedules:[]})).id;await refresh();})()'
         $result = Cdp 'Runtime.evaluate' @{expression=$setup;awaitPromise=$true;returnByValue=$true}
@@ -84,6 +93,7 @@ try {
             if ($result.exceptionDetails) { throw ($result.exceptionDetails | ConvertTo-Json -Depth 10) }
             $result.result.value | ConvertTo-Json -Depth 8
         }
+        . (Join-Path $PSScriptRoot 'table-mouse-checks.ps1')
     }
     foreach ($width in @(1440,900,390)) {
         $null = Cdp 'Emulation.setDeviceMetricsOverride' @{width=$width;height=1050;deviceScaleFactor=1;mobile=$false}
