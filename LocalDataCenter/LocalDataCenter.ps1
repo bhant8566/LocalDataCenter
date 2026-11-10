@@ -155,11 +155,15 @@ function Read-Body($stream, $request, [int]$limit) {
     return ,$bytes
 }
 
-function Send-Response($stream, $status, $type, [byte[]]$bytes, $extra = '') {
-    $headers = "HTTP/1.1 $status`r`nContent-Type: $type`r`nContent-Length: $($bytes.Length)`r`nConnection: close`r`nX-Content-Type-Options: nosniff`r`nReferrer-Policy: no-referrer`r`nCache-Control: no-store`r`n$extra`r`n"
+function Send-Response($stream, $status, $type, [byte[]]$bytes, $extra = '', $cacheControl = 'no-store') {
+    $script:reuseClient = $status -eq '200 OK'
+    $connection = 'close'
+    if ($script:reuseClient) { $connection = 'keep-alive' }
+    $headers = "HTTP/1.1 $status`r`nContent-Type: $type`r`nContent-Length: $($bytes.Length)`r`nConnection: $connection`r`nX-Content-Type-Options: nosniff`r`nReferrer-Policy: no-referrer`r`nCache-Control: $cacheControl`r`n$extra`r`n"
     $raw = [Text.Encoding]::ASCII.GetBytes($headers)
     $stream.Write($raw,0,$raw.Length)
     $stream.Write($bytes,0,$bytes.Length)
+    $stream.Flush()
 }
 
 function Send-Json($stream, $value, $status = '200 OK') {
@@ -208,6 +212,7 @@ function Convert-Schedule($schedule) {
 
 function Update-Data($payload) {
     $data = Read-Data
+    $beforeFiles = @(Get-AttachmentIds $data)
     $id = [string]$payload.id
     switch ($payload.kind) {
         { $_ -in 'project','section' } {
@@ -271,6 +276,54 @@ function Update-Data($payload) {
         default { throw '未知的資料類型。' }
     }
     Save-Data $data
+    Remove-UnusedAttachments $beforeFiles $data
+    return $id
+}
+
+function Get-AttachmentIds($data) {
+    foreach ($event in $data.Events) {
+        foreach ($file in $event.files) { if ($file.id) { [string]$file.id } }
+        foreach ($schedule in $event.schedules) {
+            foreach ($file in $schedule.files) { if ($file.id) { [string]$file.id } }
+        }
+        foreach ($match in [regex]::Matches([string]$event.html, '/attachment/([a-f0-9]{32}\.(?:png|jpg|gif|webp|bin))')) { $match.Groups[1].Value }
+    }
+}
+
+function Remove-UnusedAttachments($beforeFiles, $data) {
+    $retained = @(Get-AttachmentIds $data)
+    foreach ($id in @($beforeFiles | Select-Object -Unique)) {
+        if ($id -notmatch '^[a-f0-9]{32}\.(png|jpg|gif|webp|bin)$' -or $id -in $retained) { continue }
+        try { [IO.File]::Delete((Join-Path $attachments $id)) }
+        catch { $script:cleanupWarnings += "資料已儲存、原檔未刪除：$id" }
+    }
+}
+
+function Move-Event($payload) {
+    $data = Read-Data
+    $event = $data.Events | Where-Object id -eq ([string]$payload.id) | Select-Object -First 1
+    $target = $data.Sections | Where-Object id -eq ([string]$payload.sectionId) | Select-Object -First 1
+    if (!$event -or !$target) { throw '找不到事件或目標分頁。' }
+    $source = $data.Sections | Where-Object id -eq $event.sectionId | Select-Object -First 1
+    if (!$source -or $source.projectId -ne $target.projectId) { throw '只能搬移至同一專案的分頁。' }
+    if ($event.sectionId -ne $target.id) { $event.sectionId = $target.id; Save-Data $data }
+    return $event.id
+}
+
+function Remove-Container($payload, $kind) {
+    $data = Read-Data
+    $beforeFiles = @(Get-AttachmentIds $data)
+    $id = [string]$payload.id
+    $sections = @($id)
+    if ($kind -eq 'project') {
+        if (!$id -or $id -notin $data.Projects.id) { throw '找不到專案。' }
+        $sections = @($data.Sections | Where-Object projectId -eq $id | ForEach-Object id)
+        $data.Projects = @($data.Projects | Where-Object id -ne $id)
+    } elseif (!$id -or $id -notin $data.Sections.id) { throw '找不到分頁。' }
+    $data.Sections = @($data.Sections | Where-Object { $_.id -notin $sections })
+    $data.Events = @($data.Events | Where-Object { $_.sectionId -notin $sections })
+    Save-Data $data
+    Remove-UnusedAttachments $beforeFiles $data
     return $id
 }
 
@@ -286,15 +339,18 @@ function Update-EventStatus($payload) {
 
 function Remove-Event($payload) {
     $data = Read-Data
+    $beforeFiles = @(Get-AttachmentIds $data)
     $id = [string]$payload.id
     if (!$id -or $id -notin $data.Events.id) { throw '找不到這筆事件。' }
     $data.Events = @($data.Events | Where-Object id -ne $id)
     Save-Data $data
+    Remove-UnusedAttachments $beforeFiles $data
     return $id
 }
 
 function Update-Schedule($payload) {
     $data = Read-Data
+    $beforeFiles = @(Get-AttachmentIds $data)
     $event = $data.Events | Where-Object id -eq ([string]$payload.eventId) | Select-Object -First 1
     if (!$event) { throw '找不到這筆事件。' }
     $schedule = Convert-Schedule $payload.schedule
@@ -307,13 +363,14 @@ function Update-Schedule($payload) {
     $event.start = ($event.schedules | Sort-Object start | Select-Object -First 1).start
     $event.end = ($event.schedules | Sort-Object end | Select-Object -Last 1).end
     Save-Data $data
+    Remove-UnusedAttachments $beforeFiles $data
     return $schedule.id
 }
 
 $web = Join-Path $PSScriptRoot 'web'
 $requiredFiles = @(
-    'index.html', 'app.css', 'app.js',
-    'vendor/pdf-lib.min.js', 'vendor/pdf.mjs', 'vendor/pdf.worker.mjs',
+    'index.html', 'app.css', 'app.js', 'features.js',
+    'vendor/pdf-lib.min.js', 'vendor/pdf.mjs', 'vendor/pdf.worker.mjs', 'vendor/xlsx.full.min.js',
     'vendor/tesseract.min.js', 'vendor/worker.min.js',
     'vendor/core/tesseract-core-lstm.wasm.js', 'vendor/core/tesseract-core-simd-lstm.wasm.js',
     'vendor/lang/chi_tra.traineddata.gz', 'vendor/lang/eng.traineddata.gz'
@@ -328,6 +385,7 @@ Import-Module ImportExcel -ErrorAction Stop
 [IO.Directory]::CreateDirectory($DataRoot) | Out-Null
 $lock = [IO.File]::Open((Join-Path $DataRoot '.session.lock'),'OpenOrCreate','ReadWrite','None')
 $listener = $null
+$pendingClients = [Collections.Generic.List[object]]::new()
 try {
     [IO.Directory]::CreateDirectory($attachments) | Out-Null
     if (Test-Path -LiteralPath $workbook) { $null = Read-Data }
@@ -338,7 +396,7 @@ try {
         '.wasm'='application/wasm'; '.gz'='application/octet-stream'
         '.png'='image/png'; '.jpg'='image/jpeg'; '.gif'='image/gif'; '.webp'='image/webp'
     }
-    $csp = "Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'self' blob:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'`r`n"
+    $csp = "Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'self' blob:; connect-src 'self' blob: data:; object-src 'none'; frame-ancestors 'none'; base-uri 'none'`r`n"
     $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback,0)
     $listener.Start()
     $port = $listener.LocalEndpoint.Port
@@ -358,15 +416,36 @@ try {
         try { Start-Process $origin } catch { Write-Warning '請手動在瀏覽器開啟上方網址。' }
     }
     while ($true) {
-        if (!$listener.Pending()) { Start-Sleep -Milliseconds 60; continue }
-        $client = $listener.AcceptTcpClient()
+        # Chromium opens idle connections in advance. Do not block the single
+        # request loop waiting for an idle socket while worker requests queue up.
+        while ($listener.Pending()) {
+            $pendingClients.Add(@{client=$listener.AcceptTcpClient(); accepted=[datetime]::UtcNow})
+        }
+        $ready = $null
+        foreach ($pending in @($pendingClients.ToArray())) {
+            try {
+                if ($pending.client.Available -gt 0 -and !$ready) { $ready = $pending; continue }
+                $expired = ([datetime]::UtcNow - $pending.accepted).TotalSeconds -gt 120 -or ($pending.client.Client.Poll(0,[Net.Sockets.SelectMode]::SelectRead) -and $pending.client.Available -eq 0)
+            } catch { $expired = $true }
+            if ($expired) {
+                $pending.client.Dispose()
+                $null = $pendingClients.Remove($pending)
+            }
+        }
+        if (!$ready) { Start-Sleep -Milliseconds 10; continue }
+        $null = $pendingClients.Remove($ready)
+        $client = $ready.client
+        $client.NoDelay = $true
+        $client.Client.LingerState = [Net.Sockets.LingerOption]::new($true,5)
         $client.ReceiveTimeout = 8000
         $client.SendTimeout = 8000
         $stream = $client.GetStream()
+        $script:reuseClient = $false
         try {
             $request = Read-Request $stream
             if (!$request) { continue }
             $path = $request.Path
+            $script:cleanupWarnings = @()
             if ($request.Headers.Host -ne $hostHeader) {
                 Send-Json $stream @{error='Host 不符。'} '403 Forbidden'
                 continue
@@ -379,7 +458,8 @@ try {
                 if ($path -eq '/api/save') {
                     $bytes = Read-Body $stream $request 4000000
                     $payload = $utf8.GetString($bytes) | ConvertFrom-Json
-                    Send-Json $stream @{id=(Update-Data $payload)}
+                    $savedId = Update-Data $payload
+                    Send-Json $stream @{id=$savedId; warnings=@($script:cleanupWarnings)}
                     continue
                 }
                 if ($path -eq '/api/status') {
@@ -391,13 +471,23 @@ try {
                 if ($path -eq '/api/delete-event') {
                     $bytes = Read-Body $stream $request 4096
                     $payload = $utf8.GetString($bytes) | ConvertFrom-Json
-                    Send-Json $stream @{id=(Remove-Event $payload)}
+                    $savedId = Remove-Event $payload
+                    Send-Json $stream @{id=$savedId; warnings=@($script:cleanupWarnings)}
                     continue
                 }
                 if ($path -eq '/api/schedule') {
                     $bytes = Read-Body $stream $request 4000000
                     $payload = $utf8.GetString($bytes) | ConvertFrom-Json
-                    Send-Json $stream @{id=(Update-Schedule $payload)}
+                    $savedId = Update-Schedule $payload
+                    Send-Json $stream @{id=$savedId; warnings=@($script:cleanupWarnings)}
+                    continue
+                }
+                if ($path -in @('/api/move-event','/api/delete-project','/api/delete-section')) {
+                    $payload = $utf8.GetString((Read-Body $stream $request 4096)) | ConvertFrom-Json
+                    if ($path -eq '/api/move-event') { $savedId = Move-Event $payload }
+                    elseif ($path -eq '/api/delete-project') { $savedId = Remove-Container $payload 'project' }
+                    else { $savedId = Remove-Container $payload 'section' }
+                    Send-Json $stream @{id=$savedId; warnings=@($script:cleanupWarnings)}
                     continue
                 }
                 if ($path -eq '/api/upload') {
@@ -419,7 +509,7 @@ try {
                 if ($path -eq '/api/data') {
                     $data = Read-Data
                     $data.apiVersion = 3
-                    $data.capabilities = @('event-delete')
+                    $data.capabilities = @('event-delete','attachment-cleanup','event-move','container-delete','rich-tables')
                     $data.ip = $ip
                     Send-Json $stream $data
                     continue
@@ -440,12 +530,14 @@ try {
                         continue
                     }
                 }
-                if ($path -match '^/(app\.(js|css)|vendor/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*)$' -and $path -notmatch '(^|/)\.{1,2}(/|$)') {
+                if ($path -match '^/(app\.(js|css)|features\.js|vendor/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*)$' -and $path -notmatch '(^|/)\.{1,2}(/|$)') {
                     $file = Join-Path $web $path.Substring(1)
                     if ([IO.File]::Exists($file)) {
                         $type = $types[[IO.Path]::GetExtension($file)]
                         if (!$type) { $type = 'application/octet-stream' }
-                        Send-Response $stream '200 OK' $type ([IO.File]::ReadAllBytes($file)) $csp
+                        $cacheControl = 'no-store'
+                        if ($path.StartsWith('/vendor/')) { $cacheControl = 'private, max-age=86400' }
+                        Send-Response $stream '200 OK' $type ([IO.File]::ReadAllBytes($file)) $csp $cacheControl
                         continue
                     }
                 }
@@ -453,9 +545,16 @@ try {
             Send-Json $stream @{error='找不到此功能。'} '404 Not Found'
         } catch {
             try { Send-Json $stream @{error=$_.Exception.Message} '400 Bad Request' } catch {}
-        } finally { $client.Dispose() }
+        } finally {
+            if ($script:reuseClient) { $pendingClients.Add(@{client=$client; accepted=[datetime]::UtcNow}) }
+            else {
+                try { $client.Client.Shutdown([Net.Sockets.SocketShutdown]::Send) } catch {}
+                $client.Dispose()
+            }
+        }
     }
 } finally {
+    foreach ($pending in $pendingClients) { $pending.client.Dispose() }
     if ($listener) { $listener.Stop() }
     $lock.Dispose()
 }

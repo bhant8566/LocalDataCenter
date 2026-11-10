@@ -1,4 +1,4 @@
-﻿param([string]$Browser = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', [switch]$StatusOnly)
+﻿param([string]$Browser = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', [switch]$StatusOnly, [switch]$OCROnly)
 $ErrorActionPreference = 'Stop'
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('ldc-ui-' + [guid]::NewGuid().ToString('N'))
 [IO.Directory]::CreateDirectory($testRoot) | Out-Null
@@ -46,6 +46,8 @@ try {
             } until ($received.EndOfMessage)
             $reply = [Text.Encoding]::UTF8.GetString($message.ToArray()) | ConvertFrom-Json
             if ($reply.method -eq 'Runtime.exceptionThrown') { [Console]::Error.WriteLine(($reply.params | ConvertTo-Json -Depth 10 -Compress)) }
+            if ($reply.method -eq 'Runtime.consoleAPICalled' -and $reply.params.args[0].value -like 'TEST:*') { Write-Output $reply.params.args[0].value | Out-Host }
+            if ($reply.method -eq 'Log.entryAdded' -and $reply.params.entry.level -eq 'error') { [Console]::Error.WriteLine($reply.params.entry.text) }
             $message.Dispose()
         } until ($reply.id -eq $requestId)
         if ($reply.error) { throw ($reply.error | ConvertTo-Json -Compress) }
@@ -53,16 +55,36 @@ try {
     }
     $null = Cdp 'Page.enable'
     $null = Cdp 'Runtime.enable'
+    $null = Cdp 'Log.enable'
     $compiled = Cdp 'Runtime.compileScript' @{expression=[IO.File]::ReadAllText((Join-Path $PSScriptRoot '../web/app.js'));sourceURL='app.js';persistScript=$false}
+    if ($compiled.exceptionDetails) { throw ($compiled.exceptionDetails | ConvertTo-Json -Depth 10) }
+    $compiled = Cdp 'Runtime.compileScript' @{expression=[IO.File]::ReadAllText((Join-Path $PSScriptRoot '../web/features.js'));sourceURL='features.js';persistScript=$false}
     if ($compiled.exceptionDetails) { throw ($compiled.exceptionDetails | ConvertTo-Json -Depth 10) }
     $null = Cdp 'Emulation.setDeviceMetricsOverride' @{width=1440;height=1050;deviceScaleFactor=1;mobile=$false}
     $null = Cdp 'Page.navigate' @{url=$origin}
     Start-Sleep -Seconds 2
+    if ($OCROnly) {
+        $setup = '(async()=>{for(let i=0;i<500 && (typeof data==="undefined" || !data.capabilities);i++) await new Promise(r=>setTimeout(r,100));projectId=(await save({kind:"project",name:"OCR tests"})).id;sectionId=(await save({kind:"section",projectId,name:"Tests"})).id;eventId=(await save({kind:"event",sectionId,title:"OCR target",date:"2026-11-10",html:"",files:[],schedules:[]})).id;await refresh();})()'
+        $result = Cdp 'Runtime.evaluate' @{expression=$setup;awaitPromise=$true;returnByValue=$true}
+        if ($result.exceptionDetails) { throw ($result.exceptionDetails | ConvertTo-Json -Depth 10) }
+        $result = Cdp 'Runtime.evaluate' @{expression=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'ocr-checks.js'));awaitPromise=$true;returnByValue=$true}
+        if ($result.exceptionDetails) { throw ($result.exceptionDetails | ConvertTo-Json -Depth 10) }
+        $result.result.value | ConvertTo-Json -Depth 8
+        return
+    }
     if ($StatusOnly) { $null = Cdp 'Runtime.evaluate' @{expression='window.statusOnly = true'} }
     $checks = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'ui-checks.js'))
     $result = Cdp 'Runtime.evaluate' @{expression=$checks;awaitPromise=$true;returnByValue=$true}
     if ($result.exceptionDetails) { throw ($result.exceptionDetails | ConvertTo-Json -Depth 10) }
     $result.result.value | ConvertTo-Json -Depth 8
+    if (!$StatusOnly) {
+        foreach ($checkFile in @('feature-checks.js','ocr-checks.js')) {
+            $checks = [IO.File]::ReadAllText((Join-Path $PSScriptRoot $checkFile))
+            $result = Cdp 'Runtime.evaluate' @{expression=$checks;awaitPromise=$true;returnByValue=$true}
+            if ($result.exceptionDetails) { throw ($result.exceptionDetails | ConvertTo-Json -Depth 10) }
+            $result.result.value | ConvertTo-Json -Depth 8
+        }
+    }
     foreach ($width in @(1440,900,390)) {
         $null = Cdp 'Emulation.setDeviceMetricsOverride' @{width=$width;height=1050;deviceScaleFactor=1;mobile=$false}
         $layout = Cdp 'Runtime.evaluate' @{expression='({width:innerWidth,scroll:document.documentElement.scrollWidth,calendar:document.querySelector("#calendar").getBoundingClientRect().width})';returnByValue=$true}

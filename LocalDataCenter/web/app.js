@@ -22,10 +22,11 @@ function element(tag, content, className) {
 }
 
 async function api(path, options = {}) {
-    if (options.method === 'POST' && data.apiVersion !== 3) throw Error(restartMessage);
+    if (options.method === 'POST' && (data.apiVersion !== 3 || !data.capabilities?.includes('attachment-cleanup'))) throw Error(restartMessage);
     const result = await fetch(path, options);
     const value = await result.json();
     if (!result.ok) throw Error(value.error);
+    if (value.warnings?.length) alert(value.warnings.join('\n'));
     return value;
 }
 
@@ -69,6 +70,15 @@ function cleanHTML(html) {
             if (/^#[a-f0-9]{6}$/i.test(node.color)) next.color = node.color;
         }
         if (node.style.color && /^(#[\da-f]{3,8}|rgba?\([\d., %]+\)|[a-z]+)$/i.test(node.style.color)) next.style.color = node.style.color;
+        if (/^(TD|TH)$/.test(node.tagName)) {
+            for (const attr of ['rowspan','colspan']) {
+                const span = Number(node.getAttribute(attr));
+                if (Number.isInteger(span) && span > 0 && span <= 1000) next.setAttribute(attr, String(span));
+            }
+        }
+        if (/^(#[\da-f]{3,8}|rgba?\([\d., %]+\)|[a-z]+)$/i.test(node.style.backgroundColor)) next.style.backgroundColor = node.style.backgroundColor;
+        if (/^(left|right|center|justify)$/.test(node.style.textAlign || node.getAttribute('align'))) next.style.textAlign = node.style.textAlign || node.getAttribute('align');
+        if (/^(top|middle|bottom)$/.test(node.style.verticalAlign)) next.style.verticalAlign = node.style.verticalAlign;
         if (/^(\d{1,2}px|xx-small|x-small|small|medium|large|x-large|xx-large)$/.test(node.style.fontSize)) next.style.fontSize = node.style.fontSize;
         if (/^(bold|[1-9]00)$/.test(node.style.fontWeight)) next.style.fontWeight = node.style.fontWeight;
         for (const child of node.childNodes) copy(child, next);
@@ -116,6 +126,10 @@ function disposePreview() {
     previewSession = undefined;
     if (!session) return;
     session.controller.abort();
+    session.observer?.disconnect();
+    session.resizeObserver?.disconnect();
+    for (const task of session.tasks || []) task.cancel();
+    for (const layer of session.layers || []) layer.cancel();
     if (session.renderTask) session.renderTask.cancel();
     if (session.loadingTask) session.loadingTask.destroy().catch(() => {});
     if (session.url) URL.revokeObjectURL(session.url);
@@ -127,42 +141,49 @@ function disposePreview() {
     $('preview-download').removeAttribute('href');
 }
 
-async function renderPreviewPage(session) {
-    if (previewSession !== session || session.rendering) return;
-    session.rendering = true;
-    $('preview-prev').disabled = $('preview-next').disabled = true;
+async function renderPreviewPage(session, number = session.page) {
+    if (previewSession !== session || session.rendered.has(number)) return;
+    session.rendered.add(number);
+    const wrapper = session.pages[number - 1];
     try {
-        const page = await session.pdf.getPage(session.page);
+        const page = await session.pdf.getPage(number);
         if (previewSession !== session) return;
         const original = page.getViewport({scale:1});
         const viewport = page.getViewport({scale:Math.min(2, 1800 / Math.max(original.width, original.height))});
         const canvas = element('canvas');
         canvas.width = Math.ceil(viewport.width); canvas.height = Math.ceil(viewport.height);
-        canvas.setAttribute('aria-label', 'PDF 第 ' + session.page + ' 頁');
-        $('preview-content').replaceChildren(canvas);
-        session.renderTask = page.render({canvasContext:canvas.getContext('2d'), viewport});
-        await session.renderTask.promise;
+        canvas.setAttribute('aria-label', 'PDF 第 ' + number + ' 頁');
+        wrapper.style.aspectRatio = viewport.width + ' / ' + viewport.height;
+        wrapper.style.setProperty('--scale-factor', viewport.scale);
+        wrapper.style.width = viewport.width + 'px';
+        wrapper.replaceChildren(canvas);
+        const task = page.render({canvasContext:canvas.getContext('2d'), viewport});
+        session.tasks.add(task);
+        await task.promise;
+        session.tasks.delete(task);
         if (previewSession !== session) return;
-        $('preview-page').textContent = session.page + ' / ' + session.pdf.numPages;
+        const text = element('div', undefined, 'textLayer');
+        text.style.width = viewport.width + 'px'; text.style.height = viewport.height + 'px';
+        wrapper.append(text);
+        wrapper.dataset.renderWidth = viewport.width;
+        text.style.transform = 'scale(' + (wrapper.clientWidth / viewport.width) + ')';
+        const layer = new session.pdfjs.TextLayer({textContentSource:await page.getTextContent(), container:text, viewport});
+        session.layers.add(layer);
+        await layer.render();
+        session.layers.delete(layer);
         $('preview-status').textContent = '';
         page.cleanup();
     } catch (error) {
-        if (previewSession === session) $('preview-status').textContent = '預覽失敗，可下載原檔查看。';
-    } finally {
-        session.rendering = false;
-        if (previewSession === session) {
-            session.renderTask = undefined;
-            $('preview-prev').disabled = session.page <= 1;
-            $('preview-next').disabled = session.page >= session.pdf.numPages;
-        }
+        session.rendered.delete(number);
+        if (previewSession === session) $('preview-status').textContent = '第 ' + number + ' 頁預覽失敗，可下載原檔查看。';
     }
 }
 
 async function openPreview(file) {
     disposePreview();
-    const session = {controller:new AbortController(), page:1};
+    const session = {controller:new AbortController(), page:1, tasks:new Set(), layers:new Set(), rendered:new Set()};
     previewSession = session;
-    const url = '/attachment/' + file.id;
+    const url = file.url || '/attachment/' + file.id;
     $('preview-title').textContent = file.name;
     $('preview-download').href = url;
     $('preview-download').download = file.name;
@@ -172,7 +193,7 @@ async function openPreview(file) {
     const ext = file.name.split('.').pop().toLowerCase();
     const type = Object.prototype.hasOwnProperty.call(imageType, ext) ? imageType[ext] : '';
     const textTypes = new Set(['txt','csv','log','md','json','xml','yaml','yml','ini']);
-    if (!type && ext !== 'pdf' && !textTypes.has(ext)) {
+    if (!type && !['pdf','xls','xlsx'].includes(ext) && !textTypes.has(ext)) {
         $('preview-status').textContent = '此格式不支援預覽，請下載原檔查看。';
         return;
     }
@@ -189,7 +210,7 @@ async function openPreview(file) {
             image.src = session.url;
             $('preview-content').append(image);
         } else if (ext === 'pdf') {
-            const pdfjs = await import('/vendor/pdf.mjs');
+            const pdfjs = session.pdfjs = await import('/vendor/pdf.mjs');
             if (previewSession !== session) return;
             pdfjs.GlobalWorkerOptions.workerSrc = '/vendor/pdf.worker.mjs';
             session.loadingTask = pdfjs.getDocument({data:bytes, isEvalSupported:false,
@@ -197,14 +218,43 @@ async function openPreview(file) {
             session.pdf = await session.loadingTask.promise;
             if (previewSession !== session) return;
             $('preview-pages').hidden = false;
+            session.pages = [];
+            session.resizeObserver = new ResizeObserver(entries => {
+                for (const entry of entries) {
+                    const layer = entry.target.querySelector('.textLayer');
+                    if (layer) layer.style.transform = 'scale(' + (entry.target.clientWidth / Number(entry.target.dataset.renderWidth)) + ')';
+                }
+            });
+            const first = await session.pdf.getPage(1);
+            const size = first.getViewport({scale:1});
+            for (let n = 1; n <= session.pdf.numPages; n++) {
+                const wrapper = element('div', undefined, 'pdf-page');
+                wrapper.dataset.page = n;
+                wrapper.style.aspectRatio = size.width + ' / ' + size.height;
+                wrapper.setAttribute('aria-label', '第 ' + n + ' 頁');
+                session.pages.push(wrapper);
+                $('preview-content').append(wrapper);
+                session.resizeObserver.observe(wrapper);
+            }
+            $('preview-content').scrollTop = 0;
+            updatePreviewPage(session, 1);
+            session.observer = new IntersectionObserver(entries => {
+                for (const entry of entries) if (entry.isIntersecting) renderPreviewPage(session, Number(entry.target.dataset.page));
+            }, {root:$('preview-content'), rootMargin:'400px'});
+            session.pages.forEach(page => session.observer.observe(page));
             await renderPreviewPage(session);
+        } else if (ext === 'xls' || ext === 'xlsx') {
+            const signature = new Uint8Array(bytes);
+            if (ext === 'xlsx' ? !(signature[0] === 0x50 && signature[1] === 0x4b) : !((signature[0] === 0xd0 && signature[1] === 0xcf) || signature[0] === 0x09)) throw Error('檔案內容不是有效的 Excel 格式。');
+            renderWorkbookPreview(bytes);
+            $('preview-status').textContent = '';
         } else {
             const text = new TextDecoder('utf-8', {fatal:true}).decode(bytes);
             $('preview-content').append(element('pre', text));
             $('preview-status').textContent = '';
         }
     } catch (error) {
-        if (previewSession === session) $('preview-status').textContent = '無法預覽此檔案，請下載原檔查看（文字需為 UTF-8 編碼）。';
+        if (previewSession === session) $('preview-status').textContent = '無法預覽此檔案：' + (error.message || String(error)) + '。可下載原檔查看（純文字需為 UTF-8 編碼）。';
     }
 }
 $('preview').addEventListener('close', () => { if (!$('preview').open) disposePreview(); });
@@ -220,8 +270,10 @@ $('preview').addEventListener('click', event => {
 });
 for (const [id, offset] of [['preview-prev', -1], ['preview-next', 1]]) $(id).onclick = () => {
     const session = previewSession;
-    if (!session?.pdf || session.rendering) return;
+    if (!session?.pdf) return;
     session.page = Math.max(1, Math.min(session.pdf.numPages, session.page + offset));
+    session.pages[session.page - 1].scrollIntoView({block:'start'});
+    updatePreviewPage(session, session.page);
     renderPreviewPage(session);
 };
 
@@ -473,9 +525,10 @@ function render() {
         eventId = undefined;
         render();
     });
+    $('rename-project').textContent = $('rename-section').textContent = '修改';
     $('rename-project').disabled = $('new-section').disabled = !projectId;
     $('rename-section').disabled = $('new-event').disabled = !sectionId;
-    const writable = data.apiVersion === 3;
+    const writable = data.apiVersion === 3 && data.capabilities?.includes('attachment-cleanup');
     $('new-project').disabled = !writable;
     $('backend-warning').hidden = writable;
     $('backend-warning').textContent = writable ? '' : restartMessage;
@@ -485,18 +538,20 @@ function render() {
     $('ip').textContent = (data.ip || []).join(' / ') || '未偵測到 IPv4';
     const filter = $('event-filter').value;
     const sectionEvents = data.Events.filter(event => event.sectionId === sectionId);
-    const events = sectionEvents.filter(event => filter === 'all' || eventStatus(event) === filter).sort((a,b) => b.date.localeCompare(a.date));
+    const query = $('event-search').value.trim().toLocaleLowerCase();
+    const events = sectionEvents.filter(event => (filter === 'all' || eventStatus(event) === filter) && (!query || eventSearchText(event).includes(query))).sort((a,b) => b.date.localeCompare(a.date));
     if (!events.some(event => event.id === eventId)) eventId = undefined;
     $('events').replaceChildren();
     if (!events.length) {
         const hint = !projectId ? '先新增一個專案。' : !sectionId ? '在這個專案新增一個分頁。' : !sectionEvents.length ? '這個分頁還沒有事件。' : filter === 'completed' ? '這個分頁沒有已結束的事件。' : '這個分頁沒有進行中的事件。';
-        $('events').append(element('p', hint, 'empty'));
+        $('events').append(element('p', query ? '沒有符合搜尋條件的事件。' : hint, 'empty'));
     }
     for (const event of events) {
         const completed = eventStatus(event) === 'completed';
         const row = element('details', undefined, 'event ' + (completed ? 'event-completed' : 'event-active'));
         const summary = element('summary');
         summary.append(element('time', event.date), element('strong', event.title));
+        addEventDragHandle(summary, event, writable);
         const toggle = element('button', completed ? '已結束' : '進行中', 'event-status');
         toggle.type = 'button';
         toggle.setAttribute('role', 'switch');
@@ -539,7 +594,9 @@ async function refresh() {
 
 function showName(kind, item) {
     nameRequest = {kind, id:item?.id, projectId};
-    $('name-title').textContent = (item ? '改名' : '新增') + (kind === 'project' ? '專案' : '分頁');
+    $('name-title').textContent = (item ? '修改' : '新增') + (kind === 'project' ? '專案' : '分頁');
+    $('delete-container').hidden = !item;
+    $('delete-container').disabled = !data.capabilities?.includes('container-delete');
     $('name-value').value = item?.name || '';
     $('names').showModal();
 }
@@ -566,6 +623,7 @@ function localDate(date) {
 }
 
 function openEditor(event) {
+    cellStart = cellEnd = undefined;
     draft = {id:event?.id, sectionId, status:eventStatus(event), files:[...(event?.files || [])]};
     selection = undefined;
     $('event-title').value = event?.title || '';
@@ -585,7 +643,7 @@ $('delete-event').onclick = async () => {
     if (!data.capabilities?.includes('event-delete')) { notice(restartMessage); return; }
     const current = draft;
     const saved = data.Events.find(event => event.id === current.id);
-    if (!confirm('確定移除「' + (saved?.title || $('event-title').value) + '」？此事件與所有時程將一併移除，已上傳的附件原檔會保留。')) return;
+    if (!confirm('確定移除「' + (saved?.title || $('event-title').value) + '」？此事件、所有時程及無其他引用的附件原檔將一併移除。')) return;
     const controls = [$('delete-event'),$('add-image'),$('add-file'),$('edit-form').querySelector('[type=submit]')];
     controls.forEach(button => button.disabled = true);
     try {
@@ -649,6 +707,7 @@ $('table').onclick = () => {
 
 editor.addEventListener('paste', event => {
     event.preventDefault();
+    if (pasteTable(event.clipboardData)) return;
     command('insertText', event.clipboardData.getData('text/plain'));
 });
 editor.addEventListener('drop', event => event.preventDefault());
@@ -701,7 +760,7 @@ for (const button of document.querySelectorAll('[data-tool]')) button.onclick = 
     activeTool = button.dataset.tool;
     for (const name of ['pdf','ocr']) $(name).hidden = name !== activeTool;
     $('tool-title').textContent = {pdf:'PDF 切割',ocr:'OCR 辨識'}[activeTool];
-    $('insert-ocr').disabled = !$('edit').open;
+    setOCRContext(button.closest('dialog') === $('edit'));
     setToolStatus('');
     $('tool').showModal();
 };
@@ -748,60 +807,7 @@ $('split').onclick = () => toolTask($('split'), async () => {
     setToolStatus('已產生 ' + pages.length + ' 頁。');
 });
 
-$('recognize').onclick = () => toolTask($('recognize'), async () => {
-    const file = $('ocr-file').files[0];
-    if (!file) throw Error('請先選擇圖片或 PDF。');
-    $('ocr-result').value = '';
-    const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name);
-    let pageLabel = '';
-    let worker, pdf;
-    try {
-        if (isPdf) {
-            const pdfjs = await import('/vendor/pdf.mjs');
-            pdfjs.GlobalWorkerOptions.workerSrc = '/vendor/pdf.worker.mjs';
-            pdf = await pdfjs.getDocument({data:await file.arrayBuffer(), isEvalSupported:false,
-                cMapUrl:'/vendor/cmaps/', cMapPacked:true, standardFontDataUrl:'/vendor/standard_fonts/'}).promise;
-        }
-        const engine = Tesseract.createWorker(['chi_tra','eng'], 1, {
-            workerPath:'/vendor/worker.min.js', corePath:'/vendor/core', langPath:'/vendor/lang',
-            workerBlobURL:false, cacheMethod:'none',
-            logger: info => setToolStatus(pageLabel + (info.status === 'recognizing text' ? '辨識中 ' + Math.round(info.progress*100) + '%' : '準備辨識中…')),
-            errorHandler: error => setToolStatus('OCR 錯誤：' + error)
-        });
-        let deadline;
-        try {
-            worker = await Promise.race([engine, new Promise((_, reject) => {
-                deadline = setTimeout(() => reject(Error('OCR 載入逾時。請確認瀏覽器允許本機 Web Worker 與 WebAssembly。')), 45000);
-            })]);
-        } catch (error) {
-            engine.then(late => late.terminate()).catch(() => {});
-            throw error;
-        } finally { clearTimeout(deadline); }
-        const total = pdf ? pdf.numPages : 1;
-        const results = [];
-        for (let index=1; index<=total; index++) {
-            pageLabel = pdf ? '第 ' + index + ' / ' + total + ' 頁 · ' : '';
-            let image = file;
-            if (pdf) {
-                const page = await pdf.getPage(index);
-                const initial = page.getViewport({scale:1});
-                const view = page.getViewport({scale:Math.min(2.5, 3500 / Math.max(initial.width, initial.height))});
-                image = element('canvas');
-                image.width = Math.ceil(view.width);
-                image.height = Math.ceil(view.height);
-                await page.render({canvasContext:image.getContext('2d'), viewport:view}).promise;
-            }
-            const recognized = await worker.recognize(image);
-            results.push((pdf ? '〔第 ' + index + ' 頁〕\n' : '') + recognized.data.text.trim());
-            $('ocr-result').value = results.join('\n\n');
-            if (pdf) image.width = image.height = 0;
-        }
-        setToolStatus('辨識完成，可校對預覽文字。');
-    } finally {
-        if (worker) await worker.terminate();
-        if (pdf) await pdf.destroy();
-    }
-});
+$('recognize').onclick = () => toolTask($('recognize'), runOCR);
 
 $('insert-ocr').onclick = () => {
     if (busy || !$('edit').open || !$('ocr-result').value.trim()) return;
@@ -813,4 +819,3 @@ function updateClock() { renderTimeline(); drawCalendar(); }
 setInterval(updateClock, 60000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) updateClock(); });
 drawCalendar();
-refresh().catch(error => notice(error.message));

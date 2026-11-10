@@ -153,7 +153,8 @@
     const pdf = await PDFLib.PDFDocument.create(); pdf.addPage([200,200]); pdf.addPage([300,200]);
     const pdfFile = await attachment('two-pages.pdf',await pdf.save());
     await openPreview(pdfFile);
-    assert($('preview-content').querySelector('canvas') && $('preview-page').textContent === '1 / 2', 'PDF first page previews locally');
+    await until(() => $('preview-content').querySelector('.pdf-page canvas'));
+    assert($('preview-content').querySelectorAll('.pdf-page').length === 2 && /[12] \/ 2/.test($('preview-page').textContent), 'PDF pages use continuous scroll locally: ' + $('preview-page').textContent + ' ' + $('preview-status').textContent);
     $('preview-next').click(); await until(() => $('preview-page').textContent === '2 / 2');
     assert($('preview-next').disabled && !$('preview-prev').disabled, 'PDF navigation updates boundaries');
     await openPreview(await attachment('broken.pdf',new TextEncoder().encode('invalid PDF')));
