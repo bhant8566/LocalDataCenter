@@ -41,14 +41,25 @@
         assert(getSelection().toString().length>0,'PDF preview text can be selected');$('preview').close();disposePreview();
 
         const source=await PDFLib.PDFDocument.create();
-        for(let i=0;i<2;i++){const image=await source.embedPng(new Uint8Array(await blob.arrayBuffer()));const page=source.addPage([500,180]);page.drawImage(image,{x:0,y:0,width:500,height:180});if(i===1)page.setRotation(PDFLib.degrees(90));}
+        for(let i=0;i<2;i++){const image=await source.embedPng(new Uint8Array(await blob.arrayBuffer()));const page=source.addPage([595.28,841.89]);page.drawImage(image,{x:30,y:620,width:500,height:180});if(i===1)page.setRotation(PDFLib.degrees(90));}
         ocrFiles=[new File([await source.save()],'scan.pdf',{type:'application/pdf'})];ocrJob=undefined;
         await runOCR();
         console.log('TEST: PDF recognition completed');
+        assert(ocrJob.pages[0].width===2481 && ocrJob.pages[0].height===3508,'A4 PDF is recognized at 300 DPI without a 3500-pixel cap');
+        assert(ocrJob.pages[1].width===3508 && ocrJob.pages[1].height===2481,'Rotated A4 PDF is recognized at 300 DPI with swapped dimensions');
         pdfDocument=await pdfjs.getDocument({data:new Uint8Array(await ocrOutput.blob.arrayBuffer()),isEvalSupported:false}).promise;
         assert(pdfDocument.numPages===2 && (await pdfDocument.getPage(2)).rotate===90,'PDF OCR preserves page count and rotation');
         for(let n=1;n<=2;n++)assert((await (await pdfDocument.getPage(n)).getTextContent()).items.some(i=>i.str.trim()),'PDF OCR preserves text layer on page '+n);
+        const outputPage=await pdfDocument.getPage(1);
+        assert(Math.abs(outputPage.view[2]-outputPage.view[0]-595.28)<0.01 && Math.abs(outputPage.view[3]-outputPage.view[1]-841.89)<0.01,'300 DPI recognition preserves original PDF page dimensions');
         await pdfDocument.destroy();
+
+        let renderAttempts=0, cleaned=false, failedCanvas, requestedScale;
+        const failingPage={getViewport:({scale})=>{requestedScale=scale;return {width:100,height:100};},render:({canvasContext})=>{renderAttempts++;failedCanvas=canvasContext.canvas;return {promise:Promise.reject(Error('Browser canvas limit'))};},cleanup:()=>{cleaned=true;}};
+        let renderFailure;
+        try {await renderOCRPage(failingPage);} catch(error) {renderFailure=error.message;}
+        assert(renderFailure?.includes('300 DPI') && renderFailure.includes('Browser canvas limit') && requestedScale===300/72 && renderAttempts===1,'Canvas-limit failure reports 300 DPI error without retrying at lower resolution');
+        assert(cleaned && failedCanvas.width===0 && failedCanvas.height===0,'Failed PDF rendering releases canvas memory and cleans up page');
 
         await refresh();const existing=data.Events.find(e=>e.id===original.eventId);openEditor(existing);setOCRContext(true);
         assert($('ocr-target').textContent.includes(existing.title),'Editor OCR shows target event name');

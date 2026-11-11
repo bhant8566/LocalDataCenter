@@ -518,6 +518,24 @@ async function assembleOCR(job) {
     ocrOutput={blob,name:job.files[0].name.replace(/\.[^.]+$/,'').slice(0,240)+'-可搜尋.pdf',url:URL.createObjectURL(blob)};
     for (const id of ['ocr-preview','ocr-download','ocr-attach']) $(id).disabled=false;
 }
+async function renderOCRPage(page) {
+    // PDF coordinates use 72 points per inch; do not cap the pixel dimensions.
+    const view=page.getViewport({scale:300/72});
+    const canvas=element('canvas');
+    try {
+        const width=Math.ceil(view.width), height=Math.ceil(view.height);
+        if(!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width<1 || height<1) throw Error('頁面尺寸無效');
+        canvas.width=width; canvas.height=height;
+        const context=canvas.getContext('2d');
+        if(canvas.width!==width || canvas.height!==height || !context) throw Error('頁面過大或瀏覽器無法配置畫布記憶體');
+        await page.render({canvasContext:context,viewport:view}).promise;
+        return canvas;
+    } catch(error) {
+        canvas.width=canvas.height=0;
+        throw Error('無法以 300 DPI 建立辨識影像（未降低解析度）：'+(error.message || String(error)));
+    } finally { page.cleanup(); }
+}
+
 async function runOCR() {
     if (!ocrFiles.length) throw Error('請先選擇一份 PDF 或多張圖片。');
     const isPdf=file=>file.type==='application/pdf' || /\.pdf$/i.test(file.name);
@@ -550,10 +568,7 @@ async function runOCR() {
                 try {
                     setToolStatus('第 '+current+' / '+total+' 頁 · 準備辨識…');
                     if (pdf) {
-                        const page=await pdf.getPage(current), base=page.getViewport({scale:1});
-                        const view=page.getViewport({scale:Math.min(2.5,3500/Math.max(base.width,base.height))});
-                        canvas=element('canvas'); canvas.width=Math.ceil(view.width); canvas.height=Math.ceil(view.height);
-                        await page.render({canvasContext:canvas.getContext('2d'),viewport:view}).promise; page.cleanup();
+                        canvas=await renderOCRPage(await pdf.getPage(current));
                     } else canvas=await imageCanvas(job.files[index]);
                     // Tesseract embeds Unicode mappings in its invisible PDF text layer.
                     const recognized=await worker.recognize(canvas,{pdfTextOnly:true},{text:true,pdf:true});
