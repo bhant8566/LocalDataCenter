@@ -78,11 +78,14 @@
 <section id="ocr" hidden>
 <label>一份 PDF 或多張圖片<input id="ocr-file" type="file" accept=".pdf,image/*" multiple></label>
 <label>辨識語言<select id="ocr-language"><option value="chi_tra+eng">繁體中文＋英文</option><option value="chi_tra">繁體中文</option><option value="eng">英文</option></select></label>
-<label class="ocr-table-option"><input id="ocr-table-mode" type="checkbox">表格文字模式（減少直線格線干擾，辨識分散文字）</label>
-<small>表格模式保留原始頁面外觀；辨識結果為文字，不會重建可編輯表格。若細字筆畫受影響，可取消表格模式比較。</small>
+<label class="ocr-table-option"><input id="ocr-table-mode" type="checkbox">表格文字模式（辨識格線並重建可編輯表格）</label>
+<small>適用清楚的水平／垂直格線；表格版可直接校對並插入事件。未偵測到完整格線時保留文字。PDF 外觀與文字層不受校對影響。</small>
 <ol id="ocr-inputs"></ol>
 <p id="ocr-target"></p>
-<label>辨識結果<textarea id="ocr-result" rows="11" placeholder="辨識後可在此校對"></textarea></label>
+<label id="ocr-format-label" hidden>結果格式<select id="ocr-result-format"><option value="layout">表格版（可編輯）</option><option value="text">純文字</option></select></label>
+<p id="ocr-layout-note" role="status" hidden></p>
+<div id="ocr-layout" contenteditable="false" role="textbox" aria-label="表格辨識結果" aria-multiline="true" hidden></div>
+<label id="ocr-text-label">辨識結果<textarea id="ocr-result" rows="11" placeholder="辨識後可在此校對"></textarea></label>
 <div class="actions"><button id="insert-ocr">插入目前事件</button><button id="recognize" class="primary">開始辨識</button></div>
 <div class="actions"><button id="ocr-preview" disabled>預覽辨識 PDF</button><button id="ocr-download" disabled>下載 PDF</button><button id="ocr-attach" disabled>加入事件…</button></div>
 </section>

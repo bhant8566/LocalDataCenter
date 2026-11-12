@@ -491,8 +491,137 @@ function pasteTable(clipboard) {
 }
 
 let ocrFiles = [], ocrJob, ocrOutput, ocrContext;
+function clearOCRLayout() {
+    $('ocr-layout').replaceChildren();$('ocr-layout').hidden=true;
+    $('ocr-layout').contentEditable='false';$('ocr-text-label').hidden=false;
+    $('ocr-format-label').hidden=true;$('ocr-result-format').value='layout';
+    $('ocr-layout-note').hidden=true;$('ocr-layout-note').textContent='';
+}
+function showOCRFormat() {
+    const layout=!$('ocr-format-label').hidden && $('ocr-result-format').value==='layout';
+    $('ocr-layout').hidden=!layout;$('ocr-text-label').hidden=layout;
+}
+$('ocr-result-format').onchange=showOCRFormat;
+$('ocr-layout').addEventListener('paste',event=>{
+    event.preventDefault();
+    if($('ocr-layout').contentEditable==='true')document.execCommand('insertText',false,event.clipboardData.getData('text/plain'));
+});
+$('ocr-layout').addEventListener('drop',event=>event.preventDefault());
+// Group scan-line runs into physical rulings, then join intersecting rulings.
+function ruledTables(runs) {
+    if(runs.length>12000)return [];
+    const lines=[];
+    for(const run of runs.sort((a,b)=>a.axis.localeCompare(b.axis)||a.pos-b.pos)) {
+        const previous=lines.findLast(line=>line.axis===run.axis && run.pos-line.max<=4 && run.start<=line.end+4 && run.end>=line.start-4);
+        if(previous) {
+            previous.max=run.pos;previous.pos=(previous.min+previous.max)/2;
+            previous.start=Math.min(previous.start,run.start);previous.end=Math.max(previous.end,run.end);
+        } else lines.push({...run,min:run.pos,max:run.pos});
+    }
+    if(lines.length>600)return [];
+    const intersects=(a,b)=>a.axis!==b.axis && (a.axis==='h'?b.pos>=a.start-5 && b.pos<=a.end+5 && a.pos>=b.start-5 && a.pos<=b.end+5:intersects(b,a));
+    const remaining=new Set(lines),tables=[];
+    while(remaining.size) {
+        const group=[remaining.values().next().value];remaining.delete(group[0]);
+        for(let i=0;i<group.length;i++)for(const line of remaining)if(intersects(group[i],line)){group.push(line);remaining.delete(line);}
+        const positions=axis=>{
+            const result=[];
+            for(const value of group.filter(line=>line.axis===axis).map(line=>line.pos).sort((a,b)=>a-b)) {
+                if(!result.length || value-result[result.length-1]>6)result.push(value);
+            }
+            return result;
+        };
+        const xs=positions('v'),ys=positions('h'),cols=xs.length-1,rows=ys.length-1;
+        if(cols<1 || rows<1 || cols>100 || rows>1000 || cols*rows>10000)continue;
+        if(xs.some((x,i)=>i && x-xs[i-1]<8)||ys.some((y,i)=>i && y-ys[i-1]<8))continue;
+        const border=(axis,pos,start,end)=>{
+            const segments=group.filter(line=>line.axis===axis && Math.abs(line.pos-pos)<=5)
+                .map(line=>[Math.max(start,line.start),Math.min(end,line.end)]).filter(([a,b])=>b>a).sort((a,b)=>a[0]-b[0]);
+            let covered=0,until=start;
+            for(const [a,b] of segments){covered+=Math.max(0,b-Math.max(a,until));until=Math.max(until,b);}
+            return covered>=(end-start)*0.85;
+        };
+        if(!border('h',ys[0],xs[0],xs[cols])||!border('h',ys[rows],xs[0],xs[cols])||
+            !border('v',xs[0],ys[0],ys[rows])||!border('v',xs[cols],ys[0],ys[rows]))continue;
+        const parent=Array.from({length:rows*cols},(_,i)=>i);
+        const root=index=>{while(parent[index]!==index){parent[index]=parent[parent[index]];index=parent[index];}return index;};
+        const join=(a,b)=>{parent[root(a)]=root(b);};
+        for(let r=0;r<rows;r++)for(let c=0;c<cols;c++) {
+            if(c && !border('v',xs[c],ys[r],ys[r+1]))join(r*cols+c,r*cols+c-1);
+            if(r && !border('h',ys[r],xs[c],xs[c+1]))join(r*cols+c,(r-1)*cols+c);
+        }
+        const regions=new Map();
+        for(let r=0;r<rows;r++)for(let c=0;c<cols;c++) {
+            const id=root(r*cols+c);
+            if(!regions.has(id))regions.set(id,[]);regions.get(id).push({r,c});
+        }
+        const cells=[];let valid=true;
+        for(const slots of regions.values()) {
+            const r=Math.min(...slots.map(s=>s.r)),c=Math.min(...slots.map(s=>s.c));
+            const bottom=Math.max(...slots.map(s=>s.r))+1,right=Math.max(...slots.map(s=>s.c))+1;
+            if((bottom-r)*(right-c)!==slots.length){valid=false;break;}
+            cells.push({r,c,rs:bottom-r,cs:right-c,x0:xs[c],x1:xs[right],y0:ys[r],y1:ys[bottom]});
+        }
+        if(valid && cells.length>1)tables.push({rows,cols,x0:xs[0],x1:xs[cols],y0:ys[0],y1:ys[rows],cells});
+    }
+    return tables.sort((a,b)=>a.y0-b.y0||a.x0-b.x0);
+}
+function ocrWords(tsv) {
+    return String(tsv||'').split(/\r?\n/).slice(1).flatMap(line=>{
+        const fields=line.split('\t'),text=fields.slice(11).join('\t').trim();
+        if(fields[0]!=='5'||!text)return [];
+        const [x,y,w,h]=fields.slice(6,10).map(Number);
+        if(![x,y,w,h].every(Number.isFinite)||w<=0||h<=0)return [];
+        return [{text,x,y,w,h,line:fields.slice(1,5).join(':')}];
+    });
+}
+function ocrLineText(words) {
+    const lines=new Map();
+    for(const word of words){if(!lines.has(word.line))lines.set(word.line,[]);lines.get(word.line).push(word);}
+    return [...lines.values()].sort((a,b)=>a[0].y-b[0].y||a[0].x-b[0].x)
+        .map(line=>line.sort((a,b)=>a.x-b.x).map(word=>word.text).join(' ')).join('\n');
+}
+function ocrPageLayout(tables,tsv,text,pageNumber) {
+    const section=element('section'),heading=element('p','〔第 '+pageNumber+' 頁〕');section.append(heading);
+    const words=ocrWords(tsv),assigned=new Set(),pieces=[];
+    for(const table of tables) {
+        const node=element('table'),body=element('tbody');node.append(body);
+        for(let r=0;r<table.rows;r++) {
+            const row=element('tr');
+            for(const cell of table.cells.filter(cell=>cell.r===r).sort((a,b)=>a.c-b.c)) {
+                const inside=words.filter(word=>!assigned.has(word) && word.x+word.w/2>=cell.x0 && word.x+word.w/2<cell.x1 && word.y+word.h/2>=cell.y0 && word.y+word.h/2<cell.y1);
+                inside.forEach(word=>assigned.add(word));
+                const td=element('td',ocrLineText(inside));td.rowSpan=cell.rs;td.colSpan=cell.cs;
+                if(!td.textContent)td.append(element('br'));row.append(td);
+            }
+            body.append(row);
+        }
+        pieces.push({x:table.x0,y:table.y0,node});
+    }
+    const outside=new Map();
+    for(const word of words.filter(word=>!assigned.has(word))) {
+        if(!outside.has(word.line))outside.set(word.line,[]);outside.get(word.line).push(word);
+    }
+    for(const line of outside.values())pieces.push({x:Math.min(...line.map(w=>w.x)),y:Math.min(...line.map(w=>w.y)),node:element('p',ocrLineText(line))});
+    if(!words.length)pieces.push({x:0,y:0,node:element('p',text)});
+    for(const piece of pieces.sort((a,b)=>a.y-b.y||a.x-b.x))section.append(piece.node);
+    return section;
+}
+function appendOCRPage(page,pageNumber) {
+    $('ocr-layout').append(ocrPageLayout(page.tables||[],page.tsv,page.text,pageNumber));
+    if(ocrJob.pages.some(page=>page.tables?.length)) {
+        $('ocr-format-label').hidden=false;showOCRFormat();
+    }
+    if(ocrJob.tableMode) {
+        const missing=ocrJob.pages.filter(page=>!page.tables?.length).length;
+        $('ocr-layout-note').hidden=false;
+        $('ocr-layout-note').textContent='表格版與純文字可分別校對，插入事件使用目前選取的格式。'+
+            (missing?'有 '+missing+' 頁未偵測到完整格線，該頁保留文字。':'請確認列欄、合併格與文字位置後再插入事件。');
+    }
+}
 function resetOCR() {
     clearOCROutput();
+    clearOCRLayout();
     ocrFiles=[]; ocrJob=undefined; ocrContext=undefined;
     $('ocr-file').value=''; $('ocr-result').value=''; $('ocr-inputs').replaceChildren();
     $('ocr-target').textContent=''; $('recognize').textContent='開始辨識';
@@ -525,6 +654,7 @@ function drawOCRInputs() {
             button.onclick=()=>{
                 [ocrFiles[index],ocrFiles[index+offset]]=[ocrFiles[index+offset],ocrFiles[index]];
                 ocrJob=undefined; clearOCROutput(); $('ocr-result').value=''; drawOCRInputs();
+                clearOCRLayout();
                 $('recognize').textContent='開始辨識';$('recognize').hidden=false;
             }; row.append(button);
         }
@@ -533,10 +663,12 @@ function drawOCRInputs() {
 }
 $('ocr-file').onchange = () => {
     ocrFiles=[...$('ocr-file').files]; ocrJob=undefined; clearOCROutput(); $('ocr-result').value='';
+    clearOCRLayout();
     $('recognize').textContent='開始辨識';$('recognize').hidden=false; drawOCRInputs();
 };
 for(const control of [$('ocr-language'),$('ocr-table-mode')])control.onchange=()=>{
     ocrJob=undefined;clearOCROutput();$('ocr-result').value='';
+    clearOCRLayout();
     $('recognize').textContent='開始辨識';$('recognize').hidden=false;setToolStatus('設定已變更，請重新開始辨識。');
 };
 // Work on a same-size copy so the original image and PDF coordinates are preserved.
@@ -546,14 +678,17 @@ function tableOCRCanvas(source) {
         const context=canvas.getContext('2d',{willReadFrequently:true});
         context.drawImage(source,0,0);
         const image=context.getImageData(0,0,canvas.width,canvas.height),pixels=image.data;
-        const w=canvas.width,h=canvas.height,mask=new Uint8Array(w*h);
+        const w=canvas.width,h=canvas.height,mask=new Uint8Array(w*h),runs=[];
         const dark=index=>pixels[index*4+3]>128 && (pixels[index*4]+pixels[index*4+1]+pixels[index*4+2])<360;
         const horizontal=Math.max(100,Math.round(w*0.08)),vertical=Math.max(60,Math.round(h*0.025));
         for(let y=0;y<h;y++) {
             let start=0;
             for(let x=0;x<=w;x++) {
                 if(x<w && dark(y*w+x))continue;
-                if(x-start>=horizontal)for(let k=start;k<x;k++)mask[y*w+k]=1;
+                if(x-start>=horizontal) {
+                    runs.push({axis:'h',pos:y,start,end:x});
+                    for(let k=start;k<x;k++)mask[y*w+k]=1;
+                }
                 start=x+1;
             }
         }
@@ -561,13 +696,17 @@ function tableOCRCanvas(source) {
             let start=0;
             for(let y=0;y<=h;y++) {
                 if(y<h && dark(y*w+x))continue;
-                if(y-start>=vertical)for(let k=start;k<y;k++)mask[k*w+x]=1;
+                if(y-start>=vertical) {
+                    runs.push({axis:'v',pos:x,start,end:y});
+                    for(let k=start;k<y;k++)mask[k*w+x]=1;
+                }
                 start=y+1;
             }
         }
         for(let index=0;index<mask.length;index++)if(mask[index]) {
             pixels[index*4]=pixels[index*4+1]=pixels[index*4+2]=pixels[index*4+3]=255;
         }
+        canvas.ocrTables=ruledTables(runs);
         context.putImageData(image,0,0);return canvas;
     } catch(error) {canvas.width=canvas.height=0;throw error;}
 }
@@ -629,9 +768,13 @@ async function runOCR() {
     const language=$('ocr-language').value,tableMode=$('ocr-table-mode').checked;
     if(!['chi_tra+eng','chi_tra','eng'].includes(language))throw Error('請選擇支援的辨識語言。');
     if(ocrJob && (ocrJob.language!==language || ocrJob.tableMode!==tableMode))ocrJob=undefined;
-    if (!ocrJob) ocrJob={files:[...ocrFiles],isPdf:isPdf(ocrFiles[0]),pages:[],original:undefined,language,tableMode};
+    if (!ocrJob) {
+        clearOCRLayout();
+        ocrJob={files:[...ocrFiles],isPdf:isPdf(ocrFiles[0]),pages:[],original:undefined,language,tableMode};
+    }
     const job=ocrJob; let pdf,worker,deadline;
     $('ocr-file').disabled=true; $('ocr-language').disabled=$('ocr-table-mode').disabled=true;drawOCRInputs();
+    $('ocr-layout').contentEditable='false';$('ocr-result').readOnly=true;$('ocr-result-format').disabled=true;
     for (const id of ['ocr-preview','ocr-download','ocr-attach']) $(id).disabled=true;
     try {
         if (job.isPdf) {
@@ -664,11 +807,13 @@ async function runOCR() {
                         setToolStatus('第 '+current+' / '+total+' 頁 · 正在處理表格線…');
                         prepared=tableOCRCanvas(canvas);
                     }
-                    const recognized=await worker.recognize(prepared || canvas,{pdfTextOnly:true},{text:true,pdf:true});
+                    const recognized=await worker.recognize(prepared || canvas,{pdfTextOnly:true},{text:true,pdf:true,tsv:job.tableMode});
                     if (!recognized.data.pdf?.length) throw Error('辨識引擎未產生 PDF 文字層。');
                     let image;
                     if (!pdf) image=new Uint8Array(await (await new Promise(resolve=>canvas.toBlob(resolve,'image/png'))).arrayBuffer());
-                    job.pages.push({pdf:new Uint8Array(recognized.data.pdf),text:recognized.data.text.trim(),image,width:canvas.width,height:canvas.height});
+                    const page={pdf:new Uint8Array(recognized.data.pdf),text:recognized.data.text.trim(),image,width:canvas.width,height:canvas.height,
+                        tables:prepared?.ocrTables||[],tsv:recognized.data.tsv||''};
+                    job.pages.push(page);appendOCRPage(page,current);
                     $('ocr-result').value=job.pages.map((p,i)=>'〔第 '+(i+1)+' 頁〕\n'+p.text).join('\n\n');
                 } catch (error) { throw Error('第 '+current+' / '+total+' 頁失敗：'+error.message+' 已保留前面結果，按「重試未完成頁面」繼續。'); }
                 finally { if (prepared) prepared.width=prepared.height=0;if (canvas) canvas.width=canvas.height=0; }
@@ -676,13 +821,14 @@ async function runOCR() {
         }
         setToolStatus('正在建立可搜尋 PDF…'); await assembleOCR(job);
         $('recognize').hidden=true;
-        setToolStatus('已完成全部 '+total+' 頁，可預覽、下載或加入事件。校對文字僅影響純文字插入，PDF 文字層使用原辨識結果。');
+        setToolStatus('已完成全部 '+total+' 頁，可預覽、下載或加入事件。插入事件使用目前選取的表格版或純文字；校對不會修改 PDF 文字層。');
     } catch (error) { $('recognize').textContent='重試未完成頁面';$('recognize').hidden=false; throw Error(error?.message || String(error)); }
     finally {
         if (worker) await worker.terminate();
         if (pdf) await pdf.destroy();
         $('ocr-file').disabled=false;
         $('ocr-language').disabled=$('ocr-table-mode').disabled=false;
+        $('ocr-layout').contentEditable='true';$('ocr-result').readOnly=false;$('ocr-result-format').disabled=false;
         // toolTask resets busy after this finally.
         setTimeout(drawOCRInputs,0);
     }

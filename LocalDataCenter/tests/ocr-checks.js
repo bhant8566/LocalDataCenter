@@ -74,6 +74,25 @@
         const prepared=tableOCRCanvas(grid);
         assert(prepared.width===grid.width && prepared.height===grid.height,'Table preprocessing keeps coordinates and page dimensions');
         assert(gridContext.getImageData(300,20,1,1).data[0]===0 && prepared.getContext('2d').getImageData(300,20,1,1).data[0]===255,'Table line removed from OCR copy while original remains unchanged');
+        assert(prepared.ocrTables.length===1 && prepared.ocrTables[0].rows===2 && prepared.ocrTables[0].cols===2 && prepared.ocrTables[0].cells.length===4,'Original ruling geometry reconstructs the two-by-two grid');
+        const mergedRuns=[
+            {axis:'h',pos:20,start:20,end:1180},{axis:'h',pos:240,start:20,end:1180},{axis:'h',pos:480,start:20,end:1180},
+            {axis:'v',pos:20,start:20,end:480},{axis:'v',pos:600,start:240,end:480},{axis:'v',pos:1180,start:20,end:480}
+        ];
+        const merged=ruledTables(mergedRuns);
+        assert(merged.length===1 && merged[0].cells.some(cell=>cell.r===0 && cell.cs===2),'Missing internal vertical ruling creates a merged column cell');
+        const rowspan=ruledTables(mergedRuns.map(run=>({...run})).filter(run=>!(run.axis==='h'&&run.pos===240)).map(run=>run.axis==='v'&&run.pos===600?{...run,start:20}:run).concat([{axis:'h',pos:240,start:600,end:1180}]));
+        assert(rowspan[0]?.cells.some(cell=>cell.c===0&&cell.rs===2),'Missing internal horizontal ruling creates a merged row cell');
+        assert(ruledTables(mergedRuns.filter(run=>!(run.axis==='h'&&run.pos===480))).length===0,'Incomplete outer border falls back rather than inventing table cells');
+        const second=mergedRuns.map(run=>({...run,pos:run.pos+(run.axis==='h'?600:0),start:run.start+(run.axis==='v'?600:0),end:run.end+(run.axis==='v'?600:0)}));
+        assert(ruledTables([...mergedRuns.map(run=>({...run})),...second]).length===2,'Separate ruled tables retain independent grids');
+        const tsv='level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n'+
+            '5\t1\t1\t1\t1\t1\t40\t80\t150\t30\t95\tMerged text\n'+
+            '5\t1\t1\t1\t2\t1\t40\t300\t150\t30\t95\t<img src=x>\n'+
+            '5\t1\t2\t1\t1\t1\t40\t2\t150\t10\t95\tOutside caption';
+        const mergedLayout=ocrPageLayout(merged,tsv,'fallback',1);
+        assert(mergedLayout.querySelector('td').colSpan===2 && mergedLayout.querySelector('td').textContent==='Merged text','Word positions fill merged cells');
+        assert(mergedLayout.textContent.includes('Outside caption')&&!mergedLayout.querySelector('img'),'Non-table captions preserved and OCR text cannot create executable HTML');
         prepared.width=prepared.height=0;
         const gridBlob=await new Promise(resolve=>grid.toBlob(resolve,'image/png'));
         $('ocr-language').value='eng';$('ocr-table-mode').checked=true;
@@ -84,11 +103,27 @@
         await runOCR();
         assert(lastLanguages.join('+')==='eng' && ocrJob.language==='eng' && ocrJob.tableMode,'English-only and table-mode options reach real OCR engine');
         assert(/ALPHA/.test(ocrJob.pages[0].text) && /BETA/.test(ocrJob.pages[0].text) && /24680/.test(ocrJob.pages[0].text),'Real OCR recognizes text inside multiple ruled table cells');
+        const resultCells=[...$('ocr-layout').querySelectorAll('td')];
+        assert(!$('ocr-layout').hidden && resultCells.length===4 && /ALPHA/.test(resultCells[0].textContent) && /BETA/.test(resultCells[1].textContent) && /24680/.test(resultCells[2].textContent),'Real OCR words are restored to their original row and column');
+        resultCells[0].textContent='校對後 ALPHA';
+        $('ocr-result-format').value='text';$('ocr-result-format').dispatchEvent(new Event('change'));
+        assert($('ocr-layout').hidden&&!$('ocr-text-label').hidden,'User can select plain-text result');
+        $('ocr-result-format').value='layout';$('ocr-result-format').dispatchEvent(new Event('change'));
+        assert($('ocr-layout').querySelector('td').textContent==='校對後 ALPHA','Switching formats preserves table edits');
         pdfDocument=await pdfjs.getDocument({data:new Uint8Array(await ocrOutput.blob.arrayBuffer()),isEvalSupported:false}).promise;
         assert((await (await pdfDocument.getPage(1)).getTextContent()).items.some(item=>item.str.includes('ALPHA')),'Table-mode PDF has searchable text');await pdfDocument.destroy();
+        await refresh();openEditor(data.Events.find(event=>event.id===original.eventId));setOCRContext(true);
+        $('tool').showModal();$('insert-ocr').click();
+        assert(editor.querySelector('table') && editor.querySelector('td').textContent==='校對後 ALPHA' && !$('tool').open,'Insert into event preserves edited table HTML');
+        await until(()=>!ocrJob && !ocrOutput);
+        assert(!$('ocr-layout').children.length&&$('ocr-format-label').hidden,'Closing OCR releases table results as well as text and files');
+        await save({...data.Events.find(event=>event.id===original.eventId),kind:'event',html:cleanHTML(editor.innerHTML)});
+        $('edit').close();await refresh();openEditor(data.Events.find(event=>event.id===original.eventId));
+        assert(editor.querySelector('table').rows.length===2 && editor.querySelector('td').textContent==='校對後 ALPHA','Saved event reloads the reconstructed table and corrected text');$('edit').close();
         $('ocr-language').value='chi_tra';$('ocr-table-mode').checked=false;$('ocr-language').dispatchEvent(new Event('change'));
         ocrFiles=[one];await runOCR();
         assert(lastLanguages.join('+')==='chi_tra' && /[\u4e00-\u9fff]/.test(ocrJob.pages[0].text),'Traditional-Chinese-only mode recognizes Chinese text');
+        assert($('ocr-layout').hidden&&$('ocr-format-label').hidden,'Ordinary OCR retains the plain-text result');
 
         await refresh();const existing=data.Events.find(e=>e.id===original.eventId);openEditor(existing);setOCRContext(true);
         assert($('ocr-target').textContent.includes(existing.title),'Editor OCR shows target event name');

@@ -836,10 +836,13 @@ $('split').onclick = () => toolTask($('split'), async () => {
 $('recognize').onclick = () => toolTask($('recognize'), runOCR);
 
 $('insert-ocr').onclick = () => {
-    if (busy || !$('edit').open || !$('ocr-result').value.trim()) return;
+    if (busy || !$('edit').open || draft!==ocrContext) return;
+    const useLayout=!$('ocr-layout').hidden;
+    const html=useLayout?cleanHTML($('ocr-layout').innerHTML):'';
     const text=$('ocr-result').value;
+    if(useLayout?!$('ocr-layout').textContent.trim()&&!$('ocr-layout').querySelector('table'):!text.trim())return;
     $('tool').close();
-    command('insertText', text);
+    command(useLayout?'insertHTML':'insertText', useLayout?html:text);
 };
 
 function updateClock() { renderTimeline(); drawCalendar(); }
