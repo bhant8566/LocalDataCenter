@@ -358,6 +358,41 @@ $('split-cells').onclick = () => {
     } catch (error) { notice(error.message); }
 };
 
+function insertTableAxis(axis) {
+    closeTableMenu();
+    try {
+        const {table,model,bounds}=selectedRectangle();
+        const row=axis==='row', coordinate=row?'r':'c', span=row?'rs':'cs';
+        const boundary=row?bounds.bottom:bounds.right;
+        const height=model.height+(row?1:0), width=model.width+(row?0:1);
+        if(height>1000 || width>1000 || height*width>50000)throw Error('表格過大，無法繼續新增。');
+        for(const cell of model.records) {
+            if(cell[coordinate]>=boundary)cell[coordinate]++;
+            else if(cell[coordinate]+cell[span]>boundary)cell[span]++;
+        }
+        model.height=height;model.width=width;
+        drawTableModel(table,model);
+        cellStart=cellEnd=undefined;selection=undefined;clearCellSelection();
+    } catch(error) {notice(error.message);}
+}
+$('insert-row').onclick=()=>insertTableAxis('row');
+$('insert-column').onclick=()=>insertTableAxis('column');
+function applyCellBackground(color) {
+    try {
+        if(!editor.querySelector('.cell-selected')) {
+            const cell=cellAt(selection?.startContainer);
+            if(cell && editor.contains(cell))cellStart=cellEnd=cell;
+        }
+        for(const {td} of selectedRectangle().cells) {
+            if(color)td.style.backgroundColor=color;
+            else td.style.removeProperty('background-color');
+        }
+    } catch {notice('請先點選或框選要變更背景的儲存格。');}
+}
+$('cell-background').oninput=event=>applyCellBackground(event.target.value);
+$('clear-cell-background').onpointerdown=event=>event.preventDefault();
+$('clear-cell-background').onclick=()=>applyCellBackground('');
+
 const textColors=[
     ['#000000','黑色'],['#808080','灰色'],['#99001a','深紅'],['#ed1c24','紅色'],['#ff7f27','橘色'],['#fff200','黃色'],['#22b14c','綠色'],['#00a2e8','藍綠'],['#3f48cc','藍色'],['#a349a4','紫色'],
     ['#ffffff','白色'],['#c0c0c0','淺灰'],['#b97a57','棕色'],['#ffaec9','粉紅'],['#ffc90e','金黃'],['#efe4b0','米黃'],['#b5e61d','黃綠'],['#99d9ea','淺藍綠'],['#7092be','灰藍'],['#c8bfe7','淡紫'],
@@ -456,9 +491,22 @@ function pasteTable(clipboard) {
 }
 
 let ocrFiles = [], ocrJob, ocrOutput, ocrContext;
+function resetOCR() {
+    clearOCROutput();
+    ocrFiles=[]; ocrJob=undefined; ocrContext=undefined;
+    $('ocr-file').value=''; $('ocr-result').value=''; $('ocr-inputs').replaceChildren();
+    $('ocr-target').textContent=''; $('recognize').textContent='開始辨識';
+    $('recognize').hidden=false;
+    $('ocr-language').value='chi_tra+eng';$('ocr-table-mode').checked=false;
+    $('insert-ocr').disabled=true;
+    setToolStatus('');
+}
+$('tool').addEventListener('close',()=>{if(!$('tool').open)resetOCR();});
 function setOCRContext(fromEditor) {
     ocrContext = fromEditor ? draft : undefined;
     $('insert-ocr').disabled = !ocrContext;
+    $('insert-ocr').hidden = !ocrContext;
+    $('ocr-attach').hidden = !!ocrContext;
     $('ocr-target').textContent = ocrContext ? '目標事件：' + (ocrContext.id ? '' : '新增事件：') + ($('event-title').value || '未命名') : '辨識後可選擇新增事件或加入既有事件。';
     $('ocr-attach').textContent = ocrContext ? '加入此事件附件' : '加入事件…';
 }
@@ -477,6 +525,7 @@ function drawOCRInputs() {
             button.onclick=()=>{
                 [ocrFiles[index],ocrFiles[index+offset]]=[ocrFiles[index+offset],ocrFiles[index]];
                 ocrJob=undefined; clearOCROutput(); $('ocr-result').value=''; drawOCRInputs();
+                $('recognize').textContent='開始辨識';$('recognize').hidden=false;
             }; row.append(button);
         }
         $('ocr-inputs').append(row);
@@ -484,8 +533,44 @@ function drawOCRInputs() {
 }
 $('ocr-file').onchange = () => {
     ocrFiles=[...$('ocr-file').files]; ocrJob=undefined; clearOCROutput(); $('ocr-result').value='';
-    $('recognize').textContent='開始辨識'; drawOCRInputs();
+    $('recognize').textContent='開始辨識';$('recognize').hidden=false; drawOCRInputs();
 };
+for(const control of [$('ocr-language'),$('ocr-table-mode')])control.onchange=()=>{
+    ocrJob=undefined;clearOCROutput();$('ocr-result').value='';
+    $('recognize').textContent='開始辨識';$('recognize').hidden=false;setToolStatus('設定已變更，請重新開始辨識。');
+};
+// Work on a same-size copy so the original image and PDF coordinates are preserved.
+function tableOCRCanvas(source) {
+    const canvas=element('canvas');canvas.width=source.width;canvas.height=source.height;
+    try {
+        const context=canvas.getContext('2d',{willReadFrequently:true});
+        context.drawImage(source,0,0);
+        const image=context.getImageData(0,0,canvas.width,canvas.height),pixels=image.data;
+        const w=canvas.width,h=canvas.height,mask=new Uint8Array(w*h);
+        const dark=index=>pixels[index*4+3]>128 && (pixels[index*4]+pixels[index*4+1]+pixels[index*4+2])<360;
+        const horizontal=Math.max(100,Math.round(w*0.08)),vertical=Math.max(60,Math.round(h*0.025));
+        for(let y=0;y<h;y++) {
+            let start=0;
+            for(let x=0;x<=w;x++) {
+                if(x<w && dark(y*w+x))continue;
+                if(x-start>=horizontal)for(let k=start;k<x;k++)mask[y*w+k]=1;
+                start=x+1;
+            }
+        }
+        for(let x=0;x<w;x++) {
+            let start=0;
+            for(let y=0;y<=h;y++) {
+                if(y<h && dark(y*w+x))continue;
+                if(y-start>=vertical)for(let k=start;k<y;k++)mask[k*w+x]=1;
+                start=y+1;
+            }
+        }
+        for(let index=0;index<mask.length;index++)if(mask[index]) {
+            pixels[index*4]=pixels[index*4+1]=pixels[index*4+2]=pixels[index*4+3]=255;
+        }
+        context.putImageData(image,0,0);return canvas;
+    } catch(error) {canvas.width=canvas.height=0;throw error;}
+}
 async function imageCanvas(file) {
     const bitmap=await createImageBitmap(file);
     const scale=Math.min(1,3500/Math.max(bitmap.width,bitmap.height));
@@ -541,9 +626,12 @@ async function runOCR() {
     const isPdf=file=>file.type==='application/pdf' || /\.pdf$/i.test(file.name);
     if (ocrFiles.some(isPdf) && (ocrFiles.length!==1 || !isPdf(ocrFiles[0]))) throw Error('一次可處理一份 PDF，或多張圖片；請勿混合選取。');
     if (ocrFiles.some(file=>!isPdf(file) && !file.type.startsWith('image/'))) throw Error('請選擇 PDF 或圖片。');
-    if (!ocrJob) ocrJob={files:[...ocrFiles],isPdf:isPdf(ocrFiles[0]),pages:[],original:undefined};
+    const language=$('ocr-language').value,tableMode=$('ocr-table-mode').checked;
+    if(!['chi_tra+eng','chi_tra','eng'].includes(language))throw Error('請選擇支援的辨識語言。');
+    if(ocrJob && (ocrJob.language!==language || ocrJob.tableMode!==tableMode))ocrJob=undefined;
+    if (!ocrJob) ocrJob={files:[...ocrFiles],isPdf:isPdf(ocrFiles[0]),pages:[],original:undefined,language,tableMode};
     const job=ocrJob; let pdf,worker,deadline;
-    $('ocr-file').disabled=true; drawOCRInputs();
+    $('ocr-file').disabled=true; $('ocr-language').disabled=$('ocr-table-mode').disabled=true;drawOCRInputs();
     for (const id of ['ocr-preview','ocr-download','ocr-attach']) $(id).disabled=true;
     try {
         if (job.isPdf) {
@@ -554,7 +642,7 @@ async function runOCR() {
         const total=pdf ? pdf.numPages : job.files.length;
         let current=job.pages.length+1;
         if (job.pages.length < total) {
-            const engine=Tesseract.createWorker(['chi_tra','eng'],1,{
+            const engine=Tesseract.createWorker(job.language.split('+'),1,{
                 workerPath:'/vendor/worker.min.js',corePath:'/vendor/core',langPath:'/vendor/lang',workerBlobURL:true,cacheMethod:'none',
                 errorHandler:error=>setToolStatus('OCR 引擎錯誤：'+String(error)),
                 logger:info=>setToolStatus('第 '+current+' / '+total+' 頁 · '+(info.status==='recognizing text' ? '辨識中 '+Math.round(info.progress*100)+'%' : '準備辨識中…'))
@@ -563,32 +651,38 @@ async function runOCR() {
                 worker=await Promise.race([engine,new Promise((_,reject)=>{deadline=setTimeout(()=>reject(Error('OCR 載入逾時，請重試。')),45000);})]);
             } catch (error) { engine.then(late=>late.terminate()).catch(()=>{}); throw error; }
             finally { clearTimeout(deadline); }
+            await worker.setParameters({tessedit_pageseg_mode:job.tableMode?'11':'3',preserve_interword_spaces:'1'});
             for (let index=job.pages.length;index<total;index++) {
-                current=index+1; let canvas;
+                current=index+1; let canvas,prepared;
                 try {
                     setToolStatus('第 '+current+' / '+total+' 頁 · 準備辨識…');
                     if (pdf) {
                         canvas=await renderOCRPage(await pdf.getPage(current));
                     } else canvas=await imageCanvas(job.files[index]);
                     // Tesseract embeds Unicode mappings in its invisible PDF text layer.
-                    const recognized=await worker.recognize(canvas,{pdfTextOnly:true},{text:true,pdf:true});
+                    if(job.tableMode) {
+                        setToolStatus('第 '+current+' / '+total+' 頁 · 正在處理表格線…');
+                        prepared=tableOCRCanvas(canvas);
+                    }
+                    const recognized=await worker.recognize(prepared || canvas,{pdfTextOnly:true},{text:true,pdf:true});
                     if (!recognized.data.pdf?.length) throw Error('辨識引擎未產生 PDF 文字層。');
                     let image;
                     if (!pdf) image=new Uint8Array(await (await new Promise(resolve=>canvas.toBlob(resolve,'image/png'))).arrayBuffer());
                     job.pages.push({pdf:new Uint8Array(recognized.data.pdf),text:recognized.data.text.trim(),image,width:canvas.width,height:canvas.height});
                     $('ocr-result').value=job.pages.map((p,i)=>'〔第 '+(i+1)+' 頁〕\n'+p.text).join('\n\n');
                 } catch (error) { throw Error('第 '+current+' / '+total+' 頁失敗：'+error.message+' 已保留前面結果，按「重試未完成頁面」繼續。'); }
-                finally { if (canvas) canvas.width=canvas.height=0; }
+                finally { if (prepared) prepared.width=prepared.height=0;if (canvas) canvas.width=canvas.height=0; }
             }
         }
         setToolStatus('正在建立可搜尋 PDF…'); await assembleOCR(job);
-        $('recognize').textContent='重新產生 PDF';
+        $('recognize').hidden=true;
         setToolStatus('已完成全部 '+total+' 頁，可預覽、下載或加入事件。校對文字僅影響純文字插入，PDF 文字層使用原辨識結果。');
-    } catch (error) { $('recognize').textContent='重試未完成頁面'; throw Error(error?.message || String(error)); }
+    } catch (error) { $('recognize').textContent='重試未完成頁面';$('recognize').hidden=false; throw Error(error?.message || String(error)); }
     finally {
         if (worker) await worker.terminate();
         if (pdf) await pdf.destroy();
         $('ocr-file').disabled=false;
+        $('ocr-language').disabled=$('ocr-table-mode').disabled=false;
         // toolTask resets busy after this finally.
         setTimeout(drawOCRInputs,0);
     }
@@ -598,14 +692,14 @@ $('ocr-download').onclick=()=>{
     if (!ocrOutput) return;
     const link=element('a'); link.href=ocrOutput.url; link.download=ocrOutput.name; link.click();
 };
-async function attachOCRToDraft() {
-    if (!ocrOutput || !$('edit').open || !draft) throw Error('請先開啟目標事件。');
-    if (ocrOutput.blob.size > 25000000) throw Error('辨識後 PDF 超過單檔 25 MB，請下載保存或分割後再加入附件。');
+async function attachOCRToDraft(output=ocrOutput) {
+    if (!output || !$('edit').open || !draft) throw Error('請先開啟目標事件。');
+    if (output.blob.size > 25000000) throw Error('辨識後 PDF 超過單檔 25 MB，請下載保存或分割後再加入附件。');
     if (draft.files.length >= 100) throw Error('每個事件最多 100 個附件。');
     const original=draft;
-    const result=await api('/api/upload',{method:'POST',headers:{'X-Local-Token':token},body:ocrOutput.blob});
+    const result=await api('/api/upload',{method:'POST',headers:{'X-Local-Token':token},body:output.blob});
     if (draft!==original || !$('edit').open) throw Error('目標事件已關閉，請重新選擇。');
-    draft.files.push({id:result.id,name:ocrOutput.name}); drawFiles($('edit-files'),draft.files,true);
+    draft.files.push({id:result.id,name:output.name}); drawFiles($('edit-files'),draft.files,true);
     $('tool').close(); notice('PDF 已加入「'+($('event-title').value || '未命名事件')+'」，請確認並儲存事件。');
 }
 function destinationOptions(select, items, value) {
@@ -641,8 +735,9 @@ $('ocr-destination-form').onsubmit=async e=>{
     try {
         if (existing && !data.Events.some(v=>v.id===existing.id)) throw Error('找不到目標事件。');
         projectId=targetSection.projectId; sectionId=targetSection.id; eventId=existing?.id;
+        const output=ocrOutput;
         $('ocr-destination').close(); $('tool').close(); render(); openEditor(existing);
-        await toolTask($('ocr-attach'),attachOCRToDraft);
+        await toolTask($('ocr-attach'),()=>attachOCRToDraft(output));
     } catch (error) { alert(error.message); }
     finally { button.disabled=false; }
 };

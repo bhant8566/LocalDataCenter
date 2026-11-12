@@ -308,7 +308,7 @@ function scheduleState(schedule, now = new Date()) {
         progress: completed ? 1 : Math.max(0, Math.min(1, (currentDay - start) / (end + 1 - start))),
         tone: completed ? 'normal' : remaining < 5 ? 'danger' : remaining < 10 ? 'warning' : 'normal',
         label: completed ? Number(completedParts[1]) + '月' + Number(completedParts[2]) + '日已完成' : remaining < 0 ? '已逾期 ' + -remaining + ' 日' : remaining === 0 ? '今日到期' :
-            (today < start ? '尚未開始・' : '') + '剩餘 ' + remaining + ' 日'
+            today < start ? '尚未開始' : '剩餘 ' + remaining + ' 日'
     };
 }
 
@@ -633,6 +633,18 @@ function localDate(date) {
     return [date.getFullYear(), date.getMonth()+1, date.getDate()].map((n,i) => String(n).padStart(i ? 2 : 4, '0')).join('-');
 }
 
+let editorBaseline;
+function editorSnapshot() {
+    return JSON.stringify({title:$('event-title').value,date:$('event-date').value,
+        html:cleanHTML(editor.innerHTML),files:draft?.files,status:draft?.status,
+        schedules:[...$('schedule-rows').children].map(row=>({schedule:row.schedule,
+            values:[...row.querySelectorAll('input')].map(input=>input.value)}))});
+}
+function requestEditorClose() {
+    if (editorSnapshot() !== editorBaseline && !confirm('尚有未儲存的編輯內容，關閉後這些變更將會消失。確定關閉？')) return;
+    $('edit').close();
+}
+$('edit').addEventListener('cancel',event=>{event.preventDefault();requestEditorClose();});
 function openEditor(event) {
     cellStart = cellEnd = undefined;
     closeTableMenu(); closeColorPalette();
@@ -647,11 +659,12 @@ function openEditor(event) {
     $('delete-event').textContent = event?.id ? '移除事件' : '取消新增';
     $('delete-event').disabled = !!event?.id && !data.capabilities?.includes('event-delete');
     $('delete-event').title = $('delete-event').disabled ? restartMessage : '';
+    editorBaseline=editorSnapshot();
     $('edit').showModal();
 }
 $('new-event').onclick = () => openEditor();
 $('delete-event').onclick = async () => {
-    if (!draft?.id) { $('edit').close(); return; }
+    if (!draft?.id) { requestEditorClose(); return; }
     if (!data.capabilities?.includes('event-delete')) { notice(restartMessage); return; }
     const current = draft;
     const saved = data.Events.find(event => event.id === current.id);
@@ -776,7 +789,9 @@ for (const button of document.querySelectorAll('[data-tool]')) button.onclick = 
     $('tool').showModal();
 };
 for (const button of document.querySelectorAll('[data-close]')) button.onclick = () => {
-    if (button.closest('dialog') !== $('tool') || !busy) button.closest('dialog').close();
+    const dialog=button.closest('dialog');
+    if(dialog === $('edit')) {requestEditorClose();return;}
+    if (dialog !== $('tool') || !busy) dialog.close();
 };
 $('tool').addEventListener('cancel', event => { if (busy) event.preventDefault(); });
 
@@ -822,8 +837,9 @@ $('recognize').onclick = () => toolTask($('recognize'), runOCR);
 
 $('insert-ocr').onclick = () => {
     if (busy || !$('edit').open || !$('ocr-result').value.trim()) return;
+    const text=$('ocr-result').value;
     $('tool').close();
-    command('insertText', $('ocr-result').value);
+    command('insertText', text);
 };
 
 function updateClock() { renderTimeline(); drawCalendar(); }

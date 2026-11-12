@@ -36,6 +36,26 @@
         assert(!(await fetch('/attachment/'+scheduleFile.id)).ok,'Saving schedule removal deletes its physical file');
         await refresh();
 
+        let closePrompts=0;
+        window.confirm=()=>{closePrompts++;return false;};
+        openEditor(data.Events.find(e=>e.id===id));
+        $('edit').querySelector('[data-close]').click();
+        assert(!$('edit').open && closePrompts===0,'Unchanged editor closes without warning');
+        openEditor(data.Events.find(e=>e.id===id));
+        $('event-title').value+=' changed';
+        $('edit').querySelector('[data-close]').click();
+        assert($('edit').open && closePrompts===1,'Cancel discard warning keeps title edits open');
+        $('edit').dispatchEvent(new Event('cancel',{cancelable:true}));
+        assert($('edit').open && closePrompts===2,'Escape uses the same unsaved-change confirmation');
+        window.confirm=()=>true;$('edit').querySelector('[data-close]').click();
+        assert(!$('edit').open,'Confirm discard closes editor');
+        for(const change of [()=>{editor.innerHTML+='<p>new content</p>';},()=>{draft.files.push({id:'draft',name:'draft'});},()=>addScheduleRow()]) {
+            openEditor(data.Events.find(e=>e.id===id));change();
+            window.confirm=()=>false;$('edit').querySelector('[data-close]').click();
+            assert($('edit').open,'Unsaved body, attachment or schedule changes prevent closing when canceled');
+            $('edit').close();
+        }
+        window.confirm=()=>true;
         openEditor(data.Events.find(e=>e.id===id));
         editor.innerHTML='<table><tbody><tr><td>A</td><td>B</td></tr><tr><td>C</td><td>D</td></tr></tbody></table>';
         const table=editor.querySelector('table');table.scrollIntoView({block:'center'});
@@ -90,6 +110,21 @@
         cellStart=editor.querySelector('td');cellEnd=editor.querySelectorAll('td')[1];highlightCells();
         $('color').click();$('color-palette').querySelector('[data-color="#22b14c"]').click();
         assert([...editor.querySelectorAll('td')].every(cell=>cell.style.color==='rgb(34, 177, 76)') && !editor.querySelector('span').style.color,'Palette applies one color to all selected cells');
+        editor.innerHTML='<table><tr><td>A</td><td rowspan="2">B</td></tr><tr><td>C</td></tr></table>';
+        let insertion=editor.querySelector('table');cellStart=cellEnd=insertion.rows[0].cells[0];highlightCells();
+        $('insert-row').click();
+        assert(insertion.rows.length===3 && insertion.rows[0].cells[1].rowSpan===3 && insertion.rows[2].cells[0].textContent==='C','Row inserts below selected row and extends crossing rowspan');
+        editor.innerHTML='<table><tr><td>A</td><td>B</td></tr><tr><td colspan="2">C</td></tr></table>';
+        insertion=editor.querySelector('table');cellStart=cellEnd=insertion.rows[0].cells[0];highlightCells();
+        $('insert-column').click();
+        assert(insertion.rows[0].cells.length===3 && insertion.rows[0].cells[2].textContent==='B' && insertion.rows[1].cells[0].colSpan===3,'Column inserts to right and extends crossing colspan');
+        cellStart=insertion.rows[0].cells[0];cellEnd=insertion.rows[0].cells[1];highlightCells();
+        $('cell-background').value='#fff2cc';$('cell-background').dispatchEvent(new Event('input'));
+        assert(insertion.rows[0].cells[0].style.backgroundColor==='rgb(255, 242, 204)' && insertion.rows[0].cells[1].style.backgroundColor==='rgb(255, 242, 204)' && !insertion.rows[0].cells[2].style.backgroundColor,'Cell background applies only to selected cells');
+        assert(cleanHTML(editor.innerHTML).includes('background-color'),'Cell background survives save sanitization');
+        $('clear-cell-background').click();assert(!insertion.rows[0].cells[0].style.backgroundColor,'Clear background removes selected cell fill');
+        cellStart=cellEnd=insertion.rows[1].cells[0];highlightCells();$('insert-row').click();
+        assert(insertion.rows.length===3,'Row insertion works at end of merged table');
         const wideHTML='<table><tr>'+Array.from({length:18},(_,i)=>'<td>Long column value '+i+'</td>').join('')+'</tr></table>';
         editor.innerHTML=wideHTML;clearCellSelection();
         assert(editor.scrollWidth>editor.clientWidth && getComputedStyle(editor.querySelector('td')).whiteSpace==='pre','Editor scrolls wide tables without forced wrapping');

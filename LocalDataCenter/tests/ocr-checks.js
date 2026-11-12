@@ -13,8 +13,9 @@
         ocrFiles=[one,two];ocrJob=undefined;drawOCRInputs();
         $('ocr-inputs').children[1].querySelector('button').click();assert(ocrFiles[0]===two,'OCR images reorder visibly');
         // Inject a one-shot failure on page two, but run the real engine on both pages.
-        let calls=0,inject=true;
+        let calls=0,inject=true,lastLanguages;
         Tesseract.createWorker=async(...args)=>{
+            lastLanguages=args[0];
             const worker=await nativeWorker(...args),recognize=worker.recognize.bind(worker);
             worker.recognize=async(...parameters)=>{calls++;if(inject && calls===2){inject=false;throw Error('Test page failure');}return recognize(...parameters);};
             return worker;
@@ -24,6 +25,9 @@
         await runOCR();
         console.log('TEST: image recognition and failed-page retry completed');
         assert(ocrJob.pages.length===2 && calls===3 && ocrOutput,'Retry resumes at failed page');
+        assert($('recognize').hidden,'Completed OCR hides recognition action instead of offering PDF regeneration');
+        setOCRContext(false);
+        assert($('insert-ocr').hidden && !$('ocr-attach').hidden && !$('ocr-preview').hidden && !$('ocr-download').hidden,'Sidebar OCR shows preview, download and attach without insert action');
         const pdfjs=await import('/vendor/pdf.mjs');
         pdfjs.GlobalWorkerOptions.workerSrc='/vendor/pdf.worker.mjs';
         let pdfDocument=await pdfjs.getDocument({data:new Uint8Array(await ocrOutput.blob.arrayBuffer()),isEvalSupported:false}).promise;
@@ -61,19 +65,57 @@
         assert(renderFailure?.includes('300 DPI') && renderFailure.includes('Browser canvas limit') && requestedScale===300/72 && renderAttempts===1,'Canvas-limit failure reports 300 DPI error without retrying at lower resolution');
         assert(cleaned && failedCanvas.width===0 && failedCanvas.height===0,'Failed PDF rendering releases canvas memory and cleans up page');
 
+        const grid=document.createElement('canvas');grid.width=1200;grid.height=500;
+        const gridContext=grid.getContext('2d');gridContext.fillStyle='white';gridContext.fillRect(0,0,1200,500);
+        gridContext.strokeStyle='black';gridContext.lineWidth=2;
+        for(const y of [20,240,480]){gridContext.beginPath();gridContext.moveTo(20,y);gridContext.lineTo(1180,y);gridContext.stroke();}
+        for(const x of [20,600,1180]){gridContext.beginPath();gridContext.moveTo(x,20);gridContext.lineTo(x,480);gridContext.stroke();}
+        gridContext.fillStyle='black';gridContext.font='42px Arial';gridContext.fillText('TABLE ALPHA 12345',50,140);gridContext.fillText('BETA 67890',650,140);gridContext.fillText('GAMMA 24680',50,370);gridContext.fillText('DELTA 13579',650,370);
+        const prepared=tableOCRCanvas(grid);
+        assert(prepared.width===grid.width && prepared.height===grid.height,'Table preprocessing keeps coordinates and page dimensions');
+        assert(gridContext.getImageData(300,20,1,1).data[0]===0 && prepared.getContext('2d').getImageData(300,20,1,1).data[0]===255,'Table line removed from OCR copy while original remains unchanged');
+        prepared.width=prepared.height=0;
+        const gridBlob=await new Promise(resolve=>grid.toBlob(resolve,'image/png'));
+        $('ocr-language').value='eng';$('ocr-table-mode').checked=true;
+        $('ocr-language').dispatchEvent(new Event('change'));
+        assert(!ocrJob && !ocrOutput && !$('ocr-result').value,'Changing OCR settings invalidates previous results and retry state');
+        assert(!$('recognize').hidden,'Changing settings restores start-recognition action');
+        ocrFiles=[new File([gridBlob],'table.png',{type:'image/png'})];
+        await runOCR();
+        assert(lastLanguages.join('+')==='eng' && ocrJob.language==='eng' && ocrJob.tableMode,'English-only and table-mode options reach real OCR engine');
+        assert(/ALPHA/.test(ocrJob.pages[0].text) && /BETA/.test(ocrJob.pages[0].text) && /24680/.test(ocrJob.pages[0].text),'Real OCR recognizes text inside multiple ruled table cells');
+        pdfDocument=await pdfjs.getDocument({data:new Uint8Array(await ocrOutput.blob.arrayBuffer()),isEvalSupported:false}).promise;
+        assert((await (await pdfDocument.getPage(1)).getTextContent()).items.some(item=>item.str.includes('ALPHA')),'Table-mode PDF has searchable text');await pdfDocument.destroy();
+        $('ocr-language').value='chi_tra';$('ocr-table-mode').checked=false;$('ocr-language').dispatchEvent(new Event('change'));
+        ocrFiles=[one];await runOCR();
+        assert(lastLanguages.join('+')==='chi_tra' && /[\u4e00-\u9fff]/.test(ocrJob.pages[0].text),'Traditional-Chinese-only mode recognizes Chinese text');
+
         await refresh();const existing=data.Events.find(e=>e.id===original.eventId);openEditor(existing);setOCRContext(true);
         assert($('ocr-target').textContent.includes(existing.title),'Editor OCR shows target event name');
+        assert(!$('insert-ocr').hidden && $('ocr-attach').hidden && !$('ocr-preview').hidden && !$('ocr-download').hidden,'Editor OCR keeps insert, preview and download but hides attachment action');
+        const reusableOutput=ocrOutput;
         const count=draft.files.length;await attachOCRToDraft();assert(draft.files.length===count+1 && $('edit').open,'Editor OCR attaches into original draft');
         const attached=draft.files.at(-1);$('edit').close();await refresh();assert(!data.Events.find(e=>e.id===existing.id).files.some(f=>f.id===attached.id),'OCR attachment remains draft until saved');
 
+        await new Promise(r=>setTimeout(r,30));
+        ocrOutput={...reusableOutput,url:URL.createObjectURL(reusableOutput.blob)};
         setOCRContext(false);$('ocr-attach').click();assert($('ocr-destination').open,'Tool OCR requests destination');
         $('ocr-destination').close();assert(ocrOutput,'Cancel destination preserves OCR result');
         $('ocr-attach').click();$('ocr-project').value=original.projectId;drawDestinationSections();$('ocr-section').value=original.sectionId;drawDestinationEvents();$('ocr-event').value=existing.id;
-        $('ocr-destination-form').requestSubmit();await until(()=>$('edit').open && draft.id===existing.id && draft.files.some(f=>f.name===ocrOutput.name) && !busy);
+        const output=ocrOutput;
+        $('ocr-destination-form').requestSubmit();await until(()=>$('edit').open && draft.id===existing.id && draft.files.some(f=>f.name===output.name) && !busy);
         assert(draft.id===existing.id,'Tool OCR can open existing target event');$('edit').close();
+        await new Promise(r=>setTimeout(r,30));
+        if(!ocrOutput)ocrOutput={...reusableOutput,url:URL.createObjectURL(reusableOutput.blob)};
         setOCRContext(false);$('ocr-attach').click();$('ocr-project').value=original.projectId;drawDestinationSections();$('ocr-section').value=original.sectionId;drawDestinationEvents();$('ocr-event').value='';
         $('ocr-destination-form').requestSubmit();await until(()=>$('edit').open && !draft.id && draft.files.length===1 && !busy);
         assert(!draft.id && draft.sectionId===original.sectionId,'Tool OCR can open a new event draft in selected section');$('edit').close();
+        $('tool').showModal(); $('tool').querySelector('[data-close]').click();
+        await until(()=>!ocrJob && !ocrOutput);
+        assert(ocrFiles.length===0 && !$('ocr-file').value && !$('ocr-result').value && !$('ocr-inputs').children.length,'Closing OCR clears inputs, results, job and generated PDF');
+        document.querySelector('[data-tool="ocr"]').click();
+        assert(!$('ocr-result').value && $('ocr-preview').disabled && $('recognize').textContent==='開始辨識','Reopening OCR starts with a fresh session');
+        $('tool').close();
         return {passed:checks.length,checks};
     } finally {
         Tesseract.createWorker=nativeWorker;

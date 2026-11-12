@@ -18,6 +18,8 @@
     assert(oneDay.progress === 0.5 && oneDay.label === '今日到期', 'Same-day schedule is half full at noon');
     assert(scheduleState({start:'2026-11-08',end:'2026-11-08'},new Date(2026,10,9)).label === '已逾期 1 日', 'Day after deadline is overdue');
     assert(scheduleState({start:'2026-11-10',end:'2026-11-12'},noon).progress === 0, 'Future schedule is empty');
+    assert(scheduleState({start:'2026-11-10',end:'2026-11-12'},noon).label === '尚未開始', 'Future schedule displays only not-started text without remaining days');
+    assert(scheduleState({start:'2026-11-08',end:'2026-11-12'},noon).label === '剩餘 4 日', 'Countdown begins on schedule start date');
     assert(scheduleState({start:'2026-11-01',end:'2026-11-07'},noon).progress === 1, 'Expired schedule is full');
     assert(dayNumber('2027-01-01') - dayNumber('2026-12-30') === 2, 'Calendar day math crosses years');
     assert(Number.isNaN(dayNumber('2026-02-30')), 'Impossible dates rejected');
