@@ -86,6 +86,9 @@ try {
     $result = Cdp 'Runtime.evaluate' @{expression=$checks;awaitPromise=$true;returnByValue=$true}
     if ($result.exceptionDetails) { throw ($result.exceptionDetails | ConvertTo-Json -Depth 10) }
     $result.result.value | ConvertTo-Json -Depth 8
+    $result = Cdp 'Runtime.evaluate' @{expression=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'calendar-checks.js'));awaitPromise=$true;returnByValue=$true}
+    if ($result.exceptionDetails) { throw ($result.exceptionDetails | ConvertTo-Json -Depth 10) }
+    $result.result.value | ConvertTo-Json -Depth 8
     if (!$StatusOnly) {
         foreach ($checkFile in @('feature-checks.js','ocr-checks.js')) {
             $checks = [IO.File]::ReadAllText((Join-Path $PSScriptRoot $checkFile))
@@ -101,6 +104,16 @@ try {
         if ($layout.result.value.scroll -gt $width) { throw "Horizontal overflow at width $width" }
         $shot = Cdp 'Page.captureScreenshot' @{format='png'}
         [IO.File]::WriteAllBytes((Join-Path $testRoot "layout-$width.png"),[Convert]::FromBase64String($shot.data))
+        $result = Cdp 'Runtime.evaluate' @{expression='openScheduleCalendar(); openCalendarDay(localDate(new Date())); (()=>{const d=$("schedule-calendar"),r=d.getBoundingClientRect();return {width:r.width,height:r.height,scroll:d.scrollWidth,client:d.clientWidth,right:r.right,left:r.left};})()';returnByValue=$true}
+        $geometry = $result.result.value
+        if ($result.exceptionDetails -or $geometry.scroll -gt ($geometry.client + 1) -or $geometry.right -gt $width -or $geometry.left -lt 0) { throw "Calendar overflow at width $width" }
+        if ($width -eq 1440 -and [Math]::Abs($geometry.width - ($width * 0.8)) -gt 2) { throw 'Calendar modal should occupy 80% of desktop width' }
+        $shot = Cdp 'Page.captureScreenshot' @{format='png'}
+        [IO.File]::WriteAllBytes((Join-Path $testRoot "calendar-$width.png"),[Convert]::FromBase64String($shot.data))
+        $null = Cdp 'Input.dispatchKeyEvent' @{type='keyDown';key='Escape';code='Escape';windowsVirtualKeyCode=27}
+        $null = Cdp 'Input.dispatchKeyEvent' @{type='keyUp';key='Escape';code='Escape';windowsVirtualKeyCode=27}
+        $result = Cdp 'Runtime.evaluate' @{expression='$("schedule-calendar").open';returnByValue=$true}
+        if ($result.result.value) { throw 'Escape did not dismiss calendar modal' }
         $editorCheck = Cdp 'Runtime.evaluate' @{expression='openEditor(data.Events.find(e=>e.id===eventId)); ({width:document.querySelector("#edit").clientWidth,scroll:document.querySelector("#edit").scrollWidth})';returnByValue=$true}
         if ($editorCheck.result.value.scroll -gt $editorCheck.result.value.width) { throw "Editor overflow at width $width" }
         $null = Cdp 'Runtime.evaluate' @{expression='document.querySelector("#edit").close()'}

@@ -5,6 +5,7 @@ const token = document.querySelector('meta[name=local-token]').content;
 const editor = $('body');
 let data = {Projects: [], Sections: [], Events: []};
 let projectId, sectionId, eventId, draft, nameRequest, selection;
+let calendarEventView;
 let activeTool, busy = false, month = new Date(), noticeTimer;
 const restartMessage = '程式已更新，請先在原 PowerShell 視窗按 Ctrl+C，重新執行 LocalDataCenter.ps1，再開啟新網址。目前服務仍是舊版，暫停寫入以免狀態或時程漏存。';
 
@@ -526,11 +527,13 @@ function render() {
     const sections = data.Sections.filter(section => section.projectId === projectId);
     if (!sections.some(section => section.id === sectionId)) sectionId = sections[0]?.id;
     switches($('projects'), data.Projects, projectId, id => {
+        calendarEventView = undefined;
         projectId = id;
         sectionId = eventId = undefined;
         render();
     });
     switches($('sections'), sections, sectionId, id => {
+        calendarEventView = undefined;
         sectionId = id;
         eventId = undefined;
         render();
@@ -549,7 +552,10 @@ function render() {
     const filter = $('event-filter').value;
     const sectionEvents = data.Events.filter(event => event.sectionId === sectionId);
     const query = $('event-search').value.trim().toLocaleLowerCase();
-    const events = sectionEvents.filter(event => (filter === 'all' || eventStatus(event) === filter) && (!query || eventSearchText(event).includes(query))).sort((a,b) => b.date.localeCompare(a.date));
+    $('calendar-event-return').hidden = !calendarEventView;
+    $('event-search').disabled = $('event-filter').disabled = !!calendarEventView;
+    const events = sectionEvents.filter(event => calendarEventView ? event.id === calendarEventView.targetId :
+        (filter === 'all' || eventStatus(event) === filter) && (!query || eventSearchText(event).includes(query))).sort((a,b) => b.date.localeCompare(a.date));
     if (!events.some(event => event.id === eventId)) eventId = undefined;
     $('events').replaceChildren();
     if (!events.length) {
@@ -595,6 +601,7 @@ function render() {
         $('events').append(row);
     }
     renderTimeline();
+    if (typeof renderScheduleCalendar === 'function' && $('schedule-calendar').open) renderScheduleCalendar();
 }
 
 async function refresh() {
@@ -845,7 +852,10 @@ $('insert-ocr').onclick = () => {
     command(useLayout?'insertHTML':'insertText', useLayout?html:text);
 };
 
-function updateClock() { renderTimeline(); drawCalendar(); }
+function updateClock() {
+    renderTimeline(); drawCalendar();
+    if (typeof renderScheduleCalendar === 'function' && $('schedule-calendar').open) renderScheduleCalendar();
+}
 setInterval(updateClock, 60000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) updateClock(); });
 drawCalendar();

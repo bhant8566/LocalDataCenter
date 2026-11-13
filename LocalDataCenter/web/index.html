@@ -11,6 +11,7 @@
 <script defer src="/vendor/xlsx.full.min.js"></script>
 <script defer src="/app.js"></script>
 <script defer src="/features.js"></script>
+<script defer src="/calendar.js"></script>
 </head>
 <body>
 <header class="mast"><strong>Local Data Center</strong><span>本機工作紀錄</span></header>
@@ -24,11 +25,12 @@
       <div class="bar"><nav id="sections" class="switches" aria-label="專案分頁"></nav><div><button id="rename-section">改名</button><button id="new-section">＋ 分頁</button></div></div>
       <div class="bar record-heading"><h2>事件紀錄</h2><div class="record-controls"><label class="event-filter">顯示狀態<select id="event-filter"><option value="all">全部</option><option value="active">進行中</option><option value="completed">已結束</option></select></label><button id="new-event" class="primary">＋ 新增事件</button></div></div>
       <label class="record-search">搜尋事件<input id="event-search" type="search" placeholder="標題、本文、時程、附件檔名"></label>
+      <div id="calendar-event-return" class="bar" hidden><strong>從月曆開啟的事件</strong><button type="button" id="return-event-list">返回原列表</button></div>
       <div id="events"></div>
     </section>
   </main>
   <aside class="right"><div class="panel tools"><h2>工具</h2><button data-tool="pdf">PDF 切割</button><button data-tool="ocr">OCR 辨識</button></div>
-    <section id="calendar" class="panel"><h2>月曆</h2><div class="bar month-nav"><button id="prev-month" aria-label="上個月">‹</button><strong id="month"></strong><button id="next-month" aria-label="下個月">›</button></div><div id="month-grid"></div></section>
+    <section id="calendar" class="panel"><div class="bar"><h2>月曆</h2><button type="button" id="open-calendar" aria-haspopup="dialog">放大月曆</button></div><div class="bar month-nav"><button id="prev-month" aria-label="上個月">‹</button><strong id="month"></strong><button id="next-month" aria-label="下個月">›</button></div><div id="month-grid" role="button" tabindex="0" aria-label="開啟時程月曆" aria-haspopup="dialog"></div></section>
   </aside>
 </div>
 <p id="notice" role="status"></p>
@@ -103,6 +105,13 @@
 <p id="preview-status" role="status"></p><div id="preview-content"></div>
 <div id="preview-pages" class="bar" hidden><button type="button" id="preview-prev">上一頁</button><span id="preview-page"></span><button type="button" id="preview-next">下一頁</button></div>
 <div class="actions"><a id="preview-download" class="download">下載原檔</a></div>
+</dialog>
+<dialog id="schedule-calendar" aria-labelledby="calendar-title">
+<div class="bar"><h2 id="calendar-title">時程月曆</h2><button type="button" data-close aria-label="關閉時程月曆">✕</button></div>
+<nav id="calendar-projects" class="switches" aria-label="月曆專案"></nav>
+<div class="bar calendar-navigation"><button type="button" id="calendar-prev">‹ 上個月</button><strong id="calendar-month" aria-live="polite"></strong><button type="button" id="calendar-next">下個月 ›</button><button type="button" id="calendar-today">回到本月</button></div>
+<div id="calendar-body"><section class="calendar-month-view" aria-label="月份時程"><p id="calendar-empty" class="empty" hidden></p><div id="calendar-weekdays" aria-hidden="true"></div><div id="calendar-weeks"></div></section>
+<aside id="calendar-day-panel" hidden aria-labelledby="calendar-day-title"><div class="bar"><h2 id="calendar-day-title"></h2><button type="button" id="calendar-day-close" aria-label="關閉當日時程">✕</button></div><div id="calendar-day-list"></div></aside></div>
 </dialog>
 </body>
 </html>
