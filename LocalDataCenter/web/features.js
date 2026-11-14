@@ -1,5 +1,13 @@
 'use strict';
 
+function eventDateMatches(date, query) {
+    let match = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/.exec(query);
+    if (!match) match = /^(\d{4})(\d{2})(\d{2})$/.exec(query);
+    if (match) return date === `${match[1]}-${match[2].padStart(2, '0')}-${match[3].padStart(2, '0')}`;
+    match = /^(\d{1,2})[-/](\d{1,2})$/.exec(query) || /^(\d{2})(\d{2})$/.exec(query);
+    return !!match && date?.slice(5) === `${match[1].padStart(2, '0')}-${match[2].padStart(2, '0')}`;
+}
+
 function eventSearchText(event) {
     const body = document.createElement('template');
     body.innerHTML = cleanHTML(event.html || '');

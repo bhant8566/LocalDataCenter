@@ -555,7 +555,7 @@ function render() {
     $('calendar-event-return').hidden = !calendarEventView;
     $('event-search').disabled = $('event-filter').disabled = !!calendarEventView;
     const events = sectionEvents.filter(event => calendarEventView ? event.id === calendarEventView.targetId :
-        (filter === 'all' || eventStatus(event) === filter) && (!query || eventSearchText(event).includes(query))).sort((a,b) => b.date.localeCompare(a.date));
+        (filter === 'all' || eventStatus(event) === filter) && (!query || eventSearchText(event).includes(query) || eventDateMatches(event.date, query))).sort((a,b) => b.date.localeCompare(a.date));
     if (!events.some(event => event.id === eventId)) eventId = undefined;
     $('events').replaceChildren();
     if (!events.length) {
@@ -771,13 +771,19 @@ function drawCalendar() {
     const first = new Date(month.getFullYear(), month.getMonth(), 1);
     const days = new Date(first.getFullYear(), first.getMonth()+1, 0).getDate();
     $('month').textContent = first.getFullYear() + ' 年 ' + (first.getMonth()+1) + ' 月';
+    $('month').title = calendarHolidayNote(first.getFullYear()) || '台灣假日資料：2026–2027 年（含補假）';
     const grid = $('month-grid');
     grid.replaceChildren();
-    for (const label of '日一二三四五六') grid.append(element('strong', label));
+    for (const label of '日一二三四五六') grid.append(element('strong', label, label === '日' || label === '六' ? 'calendar-red' : ''));
     for (let i=0; i<first.getDay(); i++) grid.append(element('span', ''));
     for (let day=1; day<=days; day++) {
         const date = new Date(first.getFullYear(),first.getMonth(),day);
-        grid.append(element('span', day, localDate(date) === localDate(new Date()) ? 'today' : ''));
+        const key = localDate(date), holiday = calendarHolidays[key];
+        const cell = element('span', day, key === localDate(new Date()) ? 'today' : '');
+        cell.dataset.date = key;
+        cell.classList.toggle('calendar-red', isCalendarWeekend(key) || !!holiday);
+        if (holiday) { cell.title = holiday; cell.setAttribute('aria-label', key + '，' + holiday); }
+        grid.append(cell);
     }
 }
 function stepMonth(offset) {

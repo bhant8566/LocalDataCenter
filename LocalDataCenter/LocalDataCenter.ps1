@@ -369,7 +369,7 @@ function Update-Schedule($payload) {
 
 $web = Join-Path $PSScriptRoot 'web'
 $requiredFiles = @(
-    'index.html', 'app.css', 'app.js', 'features.js', 'calendar.js',
+    'index.html', 'app.css', 'app.js', 'features.js', 'calendar.js', 'holidays.js',
     'vendor/pdf-lib.min.js', 'vendor/pdf.mjs', 'vendor/pdf.worker.mjs', 'vendor/xlsx.full.min.js',
     'vendor/tesseract.min.js', 'vendor/worker.min.js',
     'vendor/core/tesseract-core-lstm.wasm.js', 'vendor/core/tesseract-core-simd-lstm.wasm.js',
@@ -532,7 +532,7 @@ try {
                     Send-Json $stream @{error="找不到附件原檔：$file。請確認備份的 Attachments 已放回這個資料位置，並保留原始檔名。"} '404 Not Found'
                     continue
                 }
-                if ($path -match '^/(app\.(js|css)|(?:features|calendar)\.js|vendor/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*)$' -and $path -notmatch '(^|/)\.{1,2}(/|$)') {
+                if ($path -match '^/(app\.(js|css)|(?:features|calendar|holidays)\.js|vendor/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*)$' -and $path -notmatch '(^|/)\.{1,2}(/|$)') {
                     $file = Join-Path $web $path.Substring(1)
                     if ([IO.File]::Exists($file)) {
                         $type = $types[[IO.Path]::GetExtension($file)]

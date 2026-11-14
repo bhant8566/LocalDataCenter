@@ -108,17 +108,35 @@ try {
         $geometry = $result.result.value
         if ($result.exceptionDetails -or $geometry.scroll -gt ($geometry.client + 1) -or $geometry.right -gt $width -or $geometry.left -lt 0) { throw "Calendar overflow at width $width" }
         if ($width -eq 1440 -and [Math]::Abs($geometry.width - ($width * 0.8)) -gt 2) { throw 'Calendar modal should occupy 80% of desktop width' }
+        $navigation = Cdp 'Runtime.evaluate' @{expression='(()=>{const n=document.querySelector(".calendar-navigation").getBoundingClientRect(),r=[...document.querySelector(".calendar-navigation").children].map(e=>e.getBoundingClientRect());return {centered:Math.abs((r[0].left+r[3].right)/2-(n.left+n.right)/2)<2,singleRow:r.every(e=>Math.abs((e.top+e.bottom)/2-(r[0].top+r[0].bottom)/2)<2),compact:r.slice(1).every((e,i)=>e.left-r[i].right<20)};})()';returnByValue=$true}
+        if (!$navigation.result.value.centered -or !$navigation.result.value.singleRow -or !$navigation.result.value.compact) { throw "Calendar navigation is not grouped and centered at width $width" }
         $shot = Cdp 'Page.captureScreenshot' @{format='png'}
         [IO.File]::WriteAllBytes((Join-Path $testRoot "calendar-$width.png"),[Convert]::FromBase64String($shot.data))
         $null = Cdp 'Input.dispatchKeyEvent' @{type='keyDown';key='Escape';code='Escape';windowsVirtualKeyCode=27}
         $null = Cdp 'Input.dispatchKeyEvent' @{type='keyUp';key='Escape';code='Escape';windowsVirtualKeyCode=27}
         $result = Cdp 'Runtime.evaluate' @{expression='$("schedule-calendar").open';returnByValue=$true}
         if ($result.result.value) { throw 'Escape did not dismiss calendar modal' }
+        $null = Cdp 'Runtime.evaluate' @{expression='openScheduleCalendar(); new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))';awaitPromise=$true}
+        $null = Cdp 'Input.dispatchMouseEvent' @{type='mousePressed';x=1;y=1;button='left';clickCount=1}
+        $null = Cdp 'Input.dispatchMouseEvent' @{type='mouseReleased';x=1;y=1;button='left';clickCount=1}
+        $result = Cdp 'Runtime.evaluate' @{expression='$("schedule-calendar").open';returnByValue=$true}
+        if ($result.result.value) { throw 'Backdrop click did not dismiss calendar modal' }
         $editorCheck = Cdp 'Runtime.evaluate' @{expression='openEditor(data.Events.find(e=>e.id===eventId)); ({width:document.querySelector("#edit").clientWidth,scroll:document.querySelector("#edit").scrollWidth})';returnByValue=$true}
         if ($editorCheck.result.value.scroll -gt $editorCheck.result.value.width) { throw "Editor overflow at width $width" }
         $null = Cdp 'Runtime.evaluate' @{expression='document.querySelector("#edit").close()'}
     }
-    Write-Output "PASS: desktop, tablet and mobile have no horizontal overflow. Screenshots: $testRoot"
+    foreach ($screen in @(@{width=1318;height=862},@{width=1440;height=900})) {
+        $null = Cdp 'Emulation.setDeviceMetricsOverride' @{width=$screen.width;height=$screen.height;deviceScaleFactor=1;mobile=$false}
+        foreach ($monthIndex in @(10,7,3)) {
+            $result = Cdp 'Runtime.evaluate' @{expression=('openScheduleCalendar(); calendarMonth=new Date(2026,' + $monthIndex + ',1); renderScheduleCalendar(); (()=>{const view=document.querySelector(".calendar-month-view"),weeks=document.querySelectorAll(".calendar-week"),last=weeks[weeks.length-1].getBoundingClientRect(),r=view.getBoundingClientRect();return {fits:last.bottom<=r.bottom+1,scroll:view.scrollHeight,client:view.clientHeight,weeks:weeks.length};})()');returnByValue=$true}
+            if ($result.exceptionDetails -or !$result.result.value.fits -or $result.result.value.scroll -gt ($result.result.value.client+1)) { throw "Full month not visible at $($screen.width)x$($screen.height), month $($monthIndex+1): $($result | ConvertTo-Json -Depth 8 -Compress)" }
+            if ($monthIndex -eq 7 -and $result.result.value.weeks -ne 6) { throw 'Six-week month fixture is incorrect' }
+            $shot = Cdp 'Page.captureScreenshot' @{format='png'}
+            [IO.File]::WriteAllBytes((Join-Path $testRoot "calendar-full-$($screen.width)-$monthIndex.png"),[Convert]::FromBase64String($shot.data))
+            $null = Cdp 'Runtime.evaluate' @{expression='$("schedule-calendar").close()'}
+        }
+    }
+    Write-Output "PASS: desktop, tablet and mobile have no horizontal overflow; five- and six-week months fit desktop height. Screenshots: $testRoot"
     foreach ($expected in @(3,0)) {
         Stop-Process -Id $server.Id -Force
         $server.WaitForExit()

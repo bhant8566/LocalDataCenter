@@ -10,18 +10,29 @@ function calendarSchedules() {
         event, schedule, section:sections.get(event.sectionId), ...scheduleState(schedule),
         key:event.id + ':' + (schedule.id || String(index).padStart(8, '0'))
     }))).filter(row => Number.isFinite(row.start) && Number.isFinite(row.end) && row.end >= row.start)
-        .sort((a, b) => a.start - b.start || a.end - b.end || a.key.localeCompare(b.key));
+        .sort((a, b) => Number(a.completed) - Number(b.completed) || a.start - b.start || a.end - b.end || a.key.localeCompare(b.key));
 }
 
-// Assign each weekly segment once, so its label and bar stay in the same lane all week.
+// Select each day's first three schedules, retaining lanes for continuing selections.
 function calendarWeekLayout(rows, start, end) {
-    const lanes = [-Infinity, -Infinity, -Infinity], visible = [], hidden = [];
-    for (const row of rows) {
-        if (row.end < start || row.start > end) continue;
-        const from = Math.max(start, row.start), to = Math.min(end, row.end);
-        const lane = lanes.findIndex(last => last < from);
-        if (lane < 0) hidden.push(row);
-        else { lanes[lane] = to; visible.push({row, from, to, lane}); }
+    const visible = [], hidden = new Map();
+    const ordered = [...rows].sort((a, b) => Number(!!a.completed) - Number(!!b.completed));
+    let previous = [];
+    for (let day = start; day <= end; day++) {
+        const active = ordered.filter(row => row.start <= day && row.end >= day);
+        const selected = active.slice(0, 3), lanes = Array(3).fill(null);
+        hidden.set(day, active.slice(3));
+        for (const row of selected) {
+            const lane = previous.findIndex(segment => segment?.row === row);
+            if (lane >= 0) lanes[lane] = previous[lane];
+        }
+        for (const row of selected) {
+            if (lanes.some(segment => segment?.row === row)) continue;
+            const lane = lanes.indexOf(null), segment = {row, from:day, to:day, lane};
+            lanes[lane] = segment; visible.push(segment);
+        }
+        for (const segment of lanes) if (segment) segment.to = day;
+        previous = lanes;
     }
     return {visible, hidden};
 }
@@ -75,6 +86,8 @@ function renderScheduleCalendar() {
     });
     const year = calendarMonth.getFullYear(), m = calendarMonth.getMonth();
     $('calendar-month').textContent = year + ' 年 ' + (m + 1) + ' 月';
+    $('calendar-holiday-note').textContent = calendarHolidayNote(year);
+    $('calendar-holiday-note').hidden = !calendarHolidayNote(year);
     const first = dayNumber(localDate(new Date(year, m, 1)));
     const last = dayNumber(localDate(new Date(year, m + 1, 0)));
     const gridStart = first - new Date(year, m, 1).getDay();
@@ -82,7 +95,7 @@ function renderScheduleCalendar() {
     const rows = calendarSchedules();
     $('calendar-empty').hidden = rows.some(row => row.start <= last && row.end >= first);
     $('calendar-empty').textContent = data.Projects.length ? '此專案本月沒有時程。' : '尚未建立專案。';
-    $('calendar-weekdays').replaceChildren(...[...'日一二三四五六'].map(day => element('strong', day)));
+    $('calendar-weekdays').replaceChildren(...[...'日一二三四五六'].map(day => element('strong', day, day === '日' || day === '六' ? 'calendar-red' : '')));
     const weeks = $('calendar-weeks'); weeks.replaceChildren();
     for (let start = gridStart; start <= last; start += 7) {
         const week = element('div', undefined, 'calendar-week');
@@ -95,12 +108,22 @@ function renderScheduleCalendar() {
             if (day < first || day > last) cell.classList.add('calendar-outside');
             else {
                 const button = element('button', String(Number(date.slice(-2))), 'calendar-date' + (date === today ? ' today' : ''));
-                button.type = 'button'; button.setAttribute('aria-label', date + ' 的時程');
+                const holiday = calendarHolidays[date];
+                button.type = 'button'; button.setAttribute('aria-label', date + ' 的時程' + (holiday ? '，' + holiday : ''));
+                button.dataset.date = date;
+                button.classList.toggle('calendar-red', isCalendarWeekend(date) || !!holiday);
                 button.setAttribute('aria-pressed', String(calendarDay === date));
                 if (date === today) button.setAttribute('aria-current', 'date');
-                button.onclick = () => openCalendarDay(date); cell.append(button);
+                button.onclick = () => openCalendarDay(date);
+                const heading = element('div', undefined, 'calendar-day-heading');
+                heading.append(button);
+                if (holiday) {
+                    const name = element('span', holiday, 'calendar-holiday calendar-red');
+                    name.title = holiday; heading.append(name);
+                }
+                cell.append(heading);
                 cell.onclick = e => { if (e.target === cell) openCalendarDay(date); };
-                const count = layout.hidden.filter(row => row.start <= day && row.end >= day).length;
+                const count = layout.hidden.get(day)?.length || 0;
                 if (count) {
                     const more = element('button', '另有 ' + count + ' 條時程', 'calendar-more');
                     more.type = 'button'; more.onclick = () => openCalendarDay(date);
@@ -134,7 +157,7 @@ function renderScheduleCalendar() {
     const list = $('calendar-day-list'); list.replaceChildren();
     if (!calendarDay) return;
     const day = dayNumber(calendarDay), selected = rows.filter(row => row.start <= day && row.end >= day);
-    $('calendar-day-title').textContent = calendarDay + ' · ' + selected.length + ' 條時程';
+    $('calendar-day-title').textContent = calendarDay + (calendarHolidays[calendarDay] ? ' · ' + calendarHolidays[calendarDay] : '') + ' · ' + selected.length + ' 條時程';
     if (!selected.length) list.append(element('p', '當天沒有時程。', 'empty'));
     for (const row of selected) {
         const button = element('button', undefined, 'calendar-day-item timeline-row ' + row.tone);
@@ -147,7 +170,19 @@ function renderScheduleCalendar() {
     }
 }
 
-$('open-calendar').onclick = openScheduleCalendar;
+let calendarPointerOutside = false;
+function outsideCalendar(event) {
+    const rect = $('schedule-calendar').getBoundingClientRect();
+    return event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom;
+}
+$('schedule-calendar').addEventListener('pointerdown', event => {
+    calendarPointerOutside = event.target === $('schedule-calendar') && outsideCalendar(event);
+});
+$('schedule-calendar').addEventListener('click', event => {
+    if (calendarPointerOutside && event.target === $('schedule-calendar') && outsideCalendar(event)) $('schedule-calendar').close();
+    calendarPointerOutside = false;
+});
+$('schedule-calendar').addEventListener('close', () => { calendarPointerOutside = false; });
 $('month-grid').onclick = openScheduleCalendar;
 $('month-grid').onkeydown = event => {
     if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openScheduleCalendar(); }
@@ -155,7 +190,7 @@ $('month-grid').onkeydown = event => {
 $('calendar-day-close').onclick = () => {
     const date = calendarDay;
     calendarDay = undefined; renderScheduleCalendar();
-    $('calendar-weeks').querySelector('[aria-label="' + date + ' 的時程"]')?.focus();
+    $('calendar-weeks').querySelector('.calendar-date[data-date="' + date + '"]')?.focus();
 };
 for (const [id, offset] of [['calendar-prev', -1], ['calendar-next', 1]]) $(id).onclick = () => {
     calendarMonth = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + offset, 1);
